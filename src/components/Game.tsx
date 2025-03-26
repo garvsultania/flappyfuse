@@ -373,11 +373,37 @@ export function Game() {
           return;
         }
 
+        // Create a unique ID for this start game transaction
+        const startTxId = `start-${Date.now()}`;
+        
+        // Add start game transaction to the queue as pending
+        addToQueue({
+          id: startTxId,
+          type: 'start',
+          status: 'pending',
+          timestamp: Date.now(),
+          data: {
+            walletAddress: address.substring(0, 8) + '...' + address.substring(address.length - 6)
+          }
+        });
+
         console.log('Calling startGame function...');
         let gameResult;
         try {
           gameResult = await startGame();
           console.log('Game started with ID:', gameResult.gameId);
+          
+          // Update the start transaction to confirmed with game ID
+          addToQueue({
+            id: startTxId,
+            type: 'start',
+            status: 'confirmed',
+            timestamp: Date.now(),
+            data: {
+              gameId: gameResult.gameId.toString(),
+              walletAddress: address.substring(0, 8) + '...' + address.substring(address.length - 6)
+            }
+          });
         } catch (startErr) {
           console.error('Start game function failed:', startErr);
           // Add more user-friendly error messages
@@ -394,6 +420,18 @@ export function Game() {
           } else if (errorMessage.includes('Wallet not initialized')) {
             errorMessage = 'Your game wallet is not ready. Please try again in a few seconds or refresh the page.';
           }
+          
+          // Update the transaction as failed
+          addToQueue({
+            id: startTxId,
+            type: 'start',
+            status: 'failed',
+            timestamp: Date.now(),
+            error: errorMessage,
+            data: {
+              walletAddress: address.substring(0, 8) + '...' + address.substring(address.length - 6)
+            }
+          });
           
           setError(errorMessage);
           setIsLoading(false);
@@ -463,6 +501,8 @@ export function Game() {
         }
       });
 
+      console.log('End game transaction created:', endTxId);
+
       // Call the custodial wallet's handleEndGame function
       const receipt = await custodialHandleEndGame(
         gameId,
@@ -471,6 +511,9 @@ export function Game() {
 
       // Update the transaction with hash if we got a receipt
       if (receipt && receipt.hash) {
+        console.log('End game transaction confirmed with hash:', receipt.hash);
+        
+        // Use addToQueue instead of updateTransaction for consistency
         addToQueue({
           id: endTxId,
           type: 'end',
@@ -483,6 +526,9 @@ export function Game() {
             totalJumps: finalGameState.totalJumps
           }
         });
+        
+        // Force save the queue to ensure it's stored in localStorage
+        forceSave();
       }
 
       // Set the final game state
@@ -490,6 +536,24 @@ export function Game() {
 
     } catch (err) {
       console.error('End game error:', err);
+      
+      const gameId = finalGameState.gameId ? parseInt(finalGameState.gameId) : 0;
+      const endTxId = `end-${gameId}-${Date.now()}`;
+      
+      // Mark the transaction as failed
+      addToQueue({
+        id: endTxId,
+        type: 'end',
+        status: 'failed',
+        timestamp: Date.now(),
+        error: err instanceof Error ? err.message : 'Unknown error',
+        data: {
+          gameId,
+          finalScore: finalGameState.score,
+          totalJumps: finalGameState.totalJumps
+        }
+      });
+      
       setError(err instanceof Error ? err.message : 'Failed to save game data');
       
       // Still end the game even if save failed
@@ -497,6 +561,9 @@ export function Game() {
     } finally {
       setIsLoading(false);
       setTransactionPending(false);
+      
+      // Force save one more time to ensure all data is persisted
+      forceSave();
     }
   };
 

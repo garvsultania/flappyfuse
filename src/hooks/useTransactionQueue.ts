@@ -53,49 +53,58 @@ export function useTransactionQueue() {
     // Ensure status is a string
     const normalizedStatus = String(transaction.status);
     
+    // Use functional state update to ensure we're working with the latest state
     setQueue(prevQueue => {
       // If this transaction already exists, update it
       const existingIndex = prevQueue.findIndex(tx => tx.id === transaction.id);
       
+      let newQueue: QueuedTransaction[];
+      
       if (existingIndex >= 0) {
         console.log('Updating existing transaction:', prevQueue[existingIndex], 'with:', transaction);
-        const newQueue = [...prevQueue];
+        newQueue = [...prevQueue];
         
-        // Ensure status changes from pending to confirmed are applied
-        if (normalizedStatus === 'confirmed' && newQueue[existingIndex].status === 'pending') {
-          console.log('Updating transaction status from pending to confirmed');
+        // Ensure we don't overwrite status incorrectly (don't change confirmed to pending)
+        if (normalizedStatus === 'pending' && newQueue[existingIndex].status === 'confirmed') {
+          console.log('Preventing confirmed -> pending status change');
+          const { status, ...otherUpdates } = transaction;
+          newQueue[existingIndex] = {
+            ...newQueue[existingIndex],
+            ...otherUpdates
+          };
+        } else {
+          newQueue[existingIndex] = {
+            ...newQueue[existingIndex],
+            ...transaction,
+            // Explicitly normalize status to string
+            status: normalizedStatus,
+            // Preserve hash if not provided in the update
+            hash: transaction.hash || newQueue[existingIndex].hash
+          };
         }
         
-        newQueue[existingIndex] = {
-          ...newQueue[existingIndex],
+        console.log('Updated transaction:', newQueue[existingIndex]);
+      } else {
+        // Otherwise add it
+        console.log('Adding new transaction to queue');
+        newQueue = [...prevQueue, {
           ...transaction,
           // Explicitly normalize status to string
-          status: normalizedStatus,
-          // Preserve hash if not provided in the update
-          hash: transaction.hash || newQueue[existingIndex].hash
-        };
-        
-        console.log('Updated transaction:', newQueue[existingIndex]);
-        return newQueue;
+          status: normalizedStatus
+        }];
       }
       
-      // Otherwise add it
-      console.log('Adding new transaction to queue');
-      return [...prevQueue, {
-        ...transaction,
-        // Explicitly normalize status to string
-        status: normalizedStatus
-      }];
+      // Directly update localStorage for immediate persistence
+      try {
+        localStorage.setItem(TRANSACTION_STORAGE_KEY, JSON.stringify(newQueue));
+        console.log('Transaction queue saved to localStorage, queue size:', newQueue.length);
+      } catch (error) {
+        console.error('Failed to save transaction queue to localStorage:', error);
+      }
+      
+      return newQueue;
     });
-    
-    // Force save to localStorage immediately for status updates
-    if (transaction.status === 'confirmed') {
-      setTimeout(() => {
-        console.log('Forcing save after status update to confirmed');
-        localStorage.setItem(TRANSACTION_STORAGE_KEY, JSON.stringify(queue));
-      }, 100);
-    }
-  }, [queue]);
+  }, []);
 
   // Update a transaction in the queue
   const updateTransaction = useCallback((id: string, updates: Partial<QueuedTransaction>) => {
@@ -172,11 +181,20 @@ export function useTransactionQueue() {
     setIsPending(false);
   }, []);
 
-  // Add a function to force save queue to localStorage
+  // Force save queue to localStorage
   const forceSave = useCallback(() => {
-    console.log('Force saving transaction queue to localStorage:', queue);
-    localStorage.setItem(TRANSACTION_STORAGE_KEY, JSON.stringify(queue));
-  }, [queue]);
+    // Get the current queue directly from state
+    setQueue(currentQueue => {
+      console.log('Force saving transaction queue to localStorage:', currentQueue);
+      try {
+        localStorage.setItem(TRANSACTION_STORAGE_KEY, JSON.stringify(currentQueue));
+        console.log('Transaction queue force-saved successfully, queue size:', currentQueue.length);
+      } catch (error) {
+        console.error('Failed to force save transaction queue:', error);
+      }
+      return currentQueue;
+    });
+  }, []);
 
   // Fix for localStorage persistence issues
   useEffect(() => {
