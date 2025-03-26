@@ -146,11 +146,10 @@ MIT License - feel free to use this code for your own projects!
 
 ## 🌐 Network Details
 
-- **Network**: Fuse Flash Network
-- **Chain ID**: 10920 (0x2AA8)
-- **RPC URL**: https://rpc.fuse-flash.quicknode.com
-- **Explorer**: https://fuse-flash.explorer.quicknode.com
-- **Faucet**: https://faucet.quicknode.com/fuse/flash
-- **Bridge**: https://bridge.fuse-flash.quicknode.com
-- **Bridge API**: https://bridge-api.fuse-flash.quicknode.com
+- **Network**: Fuse Network
+- **Chain ID**: 122
+- **RPC URL**: https://rpc.fuse.io
+- **Explorer**: https://explorer.fuse.io
+- **Faucet**: https://stakely.io/faucet/fuse-network
+- **Bridge**: https://app.voltage.finance/bridge
 - **Currency**: FUSE
