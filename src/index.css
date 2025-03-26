@@ -1,0 +1,22 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Debug styles */
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #1a202c !important;
+  min-height: 100vh;
+  color: white !important;
+}
+
+#root {
+  min-height: 100vh;
+  display: block !important;
+}
+
+canvas {
+  display: block !important;
+  margin: 0 auto;
+}
