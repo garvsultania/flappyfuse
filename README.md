@@ -2,7 +2,6 @@
 
 A blockchain-powered version of the classic Flappy Bird game, built on the Fuse Flash Network. This game demonstrates the power of on-chain gaming by recording player actions and scores while providing an engaging gaming experience.
 
-![Flappy Fuse Game](https://images.unsplash.com/photo-1614680376408-81e91ffe3db7?auto=format&fit=crop&q=80&w=1200&h=600)
 
 ## 🌟 Features
 
