@@ -355,9 +355,33 @@ export function useFlappyContract() {
       }
     };
 
+    // Add event listeners
     window.ethereum.on('chainChanged', handleChainChanged);
+    window.ethereum.on('accountsChanged', handleAccountsChanged);
+    
+    // Request permissions and connect
+    try {
+      // Request permissions
+      await window.ethereum.request({ method: 'eth_requestAccounts' });
+      
+      // Switch to Fuse Flash chain
+      await switchToFuseFlash().catch((e: Error) => {
+        console.warn('Chain switch failed:', e);
+        throw new Error('Please switch to the Fuse-Flash network in MetaMask');
+      });
+    } catch (error: any) {
+      console.error('Failed to connect wallet:', error);
+      setState(prev => ({
+        ...prev,
+        error: error.message || 'Failed to connect wallet',
+        isInitialized: true,
+      }));
+      throw error;
+    }
+
     return () => {
       window.ethereum.removeListener('chainChanged', handleChainChanged);
+      window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
     };
   }, []);
 
@@ -383,327 +407,106 @@ export function useFlappyContract() {
         }
       }
     };
-
-    window.ethereum.on('accountsChanged', handleAccountsChanged);
-    return () => {
-      window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
-    };
   }, [connectWallet]);
 
   // Update the startGame function to use safer method access
   const startGame = async () => {
-    console.log('Starting game...', {
-      address: wallet?.address,
-      walletExists: !!wallet,
-      contract: !!state.contract,
-      isConnected: state.isConnected
-    });
+    console.log('Starting game...');
+    setTransactionPending(true);
     
-    // Check if any transaction is pending
-    if (hasPendingTransactions) {
-      console.error('Cannot start game while transactions are pending');
-      throw new Error('Please wait for pending transactions to complete before starting a new game');
-    }
-    
-    // Initialize wallet first if needed
-    let currentWallet = wallet;
-    if (!currentWallet) {
-      console.log('No wallet, initializing wallet...');
-      try {
-        const initializedWallet = await initializeWallet();
-        
-        if (!initializedWallet) {
-          console.error('Failed to initialize wallet after attempt');
-          throw new Error('Unable to initialize wallet. Please try refreshing the page.');
-        }
-        
-        currentWallet = initializedWallet;
-        console.log('Wallet successfully initialized:', initializedWallet.address);
-      } catch (err) {
-        console.error('Error initializing wallet:', err);
-        throw new Error('Failed to initialize wallet: ' + (err instanceof Error ? err.message : 'Unknown error'));
-      }
-    }
-    
-    // Then try to initialize contract if needed
-    if (!state.contract) {
-      console.log('Initializing contract...');
-      try {
-        await initializeContract();
-        
-        if (!state.contract) {
-          console.error('Failed to initialize contract after attempt');
-          throw new Error('Please connect your wallet first');
-        }
-        
-        console.log('Contract successfully initialized');
-      } catch (err) {
-        console.error('Error initializing contract:', err);
-        throw new Error('Failed to initialize contract: ' + (err instanceof Error ? err.message : 'Unknown error'));
-      }
-    }
-
-    const txId = `start-${Date.now()}`;
     try {
-      // Double-check if any transaction is pending (in case one was added during initialization)
-      if (hasPendingTransactions) {
-        console.log('Found pending transaction in the queue');
-        throw new Error('Please wait for pending transaction to complete');
+      if (!state.contract) {
+        throw new Error('Contract not initialized');
       }
-
-      // Add initial pending transaction
+      
+      // Use MetaMask directly instead of custodial wallet
+      await switchToFuseFlash();
+      
+      // We'll use MetaMask signer directly
+      if (!state.signer) {
+        throw new Error('MetaMask not connected');
+      }
+      
+      console.log('Using address:', await state.signer.getAddress());
+      
+      // Create a unique transaction ID
+      const txId = `start-${Date.now()}`;
+      
+      // Add to transaction queue as pending using direct MetaMask transaction
       addToQueue({
         id: txId,
         type: 'start',
         status: 'pending',
-        timestamp: Date.now()
-      });
-
-      // Verify wallet is ready
-      if (!currentWallet) {
-        console.error('Wallet initialization failed - still null');
-        throw new Error('Wallet not initialized properly');
-      }
-      
-      // Get the wallet address
-      const walletAddress = await currentWallet.getAddress();
-      console.log('Starting game with wallet:', walletAddress);
-
-      // Try multiple RPC endpoints for better reliability
-      let provider = null;
-      let connected = false;
-      
-      for (let i = 0; i < RPC_ENDPOINTS.length; i++) {
-        try {
-          console.log(`Trying RPC endpoint ${i + 1}: ${RPC_ENDPOINTS[i]}`);
-          provider = new ethers.providers.JsonRpcProvider(RPC_ENDPOINTS[i]);
-          
-          // Test provider connection
-          const blockNumber = await provider.getBlockNumber();
-          console.log(`Provider ${i + 1} connected successfully, current block:`, blockNumber);
-          connected = true;
-          break;
-        } catch (error) {
-          console.error(`Provider ${i + 1} connection failed:`, error);
+        timestamp: Date.now(),
+        data: {
+          address: await state.signer.getAddress()
         }
-      }
+      });
       
-      if (!connected || !provider) {
-        throw new Error('Failed to connect to any network. Please check your internet connection and try again.');
-      }
-
-      // Connect wallet to provider
-      const connectedWallet = currentWallet.connect(provider);
-      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI, connectedWallet);
-      console.log('Contract connected with wallet');
-
-      // Verify contract methods
-      try {
-        const currentId = await contract.currentGameId();
-        console.log('Contract access verified, current game ID:', currentId.toString());
-      } catch (accessErr) {
-        console.error('Contract functions not accessible:', accessErr);
-        throw new Error('Could not access game contract functions. Please try again.');
-      }
-
-      // Get fresh nonce
-      const nonce = await provider.getTransactionCount(walletAddress, 'latest');
-      console.log('Using nonce:', nonce);
-
-      // Get current gas price and add 50% buffer using getFeeData
-      const feeData = await provider.getFeeData();
-      const gasPrice = feeData.gasPrice ? 
-        (BigInt(feeData.gasPrice.toString()) * BigInt(150)) / BigInt(100) : 
-        BigInt(20e9);
-      console.log('Using gas price:', gasPrice.toString());
-
-      // Use a fixed gas limit for startGame
-      const gasLimit = BigInt(300000); // Fixed gas limit that should be sufficient
-      console.log('Using fixed gas limit:', gasLimit.toString());
-
-      console.log('Sending startGame transaction with params:', {
-        walletAddress,
-        nonce,
-        gasPrice: gasPrice.toString(),
-        gasLimit: gasLimit.toString(),
-        type: 0
-      });
-
-      // Add initial pending transaction directly to the queue
+      // Get gas fees with buffer to ensure transaction goes through
+      const feeData = await state.provider?.getFeeData();
+      const gasPrice = feeData?.gasPrice ? 
+        feeData.gasPrice.mul(150).div(100) : // Add 50% buffer
+        ethers.utils.parseUnits('20', 'gwei');
+      
+      // Call the contract method directly with MetaMask
+      const tx = await state.contract.startGame(
+        {
+          gasLimit: 5000000,
+          gasPrice,
+          type: 0 // Use legacy transaction format
+        }
+      );
+      
+      // Update transaction with hash
       addToQueue({
         id: txId,
         type: 'start',
         status: 'pending',
         timestamp: Date.now(),
-        data: { address: walletAddress }
+        hash: tx.hash,
+        data: {
+          address: await state.signer.getAddress()
+        }
       });
-
-      // Prepare transaction with simplified parameters
-      const tx = await contract.startGame(walletAddress, {
-        nonce,
-        gasPrice,
-        gasLimit,
-        type: 0
-      });
-
-      console.log('Transaction sent:', tx.hash);
-
-      // Update transaction status with hash
-      addToQueue({
-        id: txId,
-        type: 'start',
-        status: 'pending',
-        timestamp: Date.now(),
-        hash: tx.hash
-      });
-
-      // Wait for confirmation with timeout
-      console.log('Waiting for transaction confirmation...');
+      
+      console.log('Start game transaction sent:', tx.hash);
+      
+      // Wait for transaction confirmation with timeout
       const receipt = await Promise.race([
-        tx.wait(),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Transaction timeout')), 30000)
-        )
+        tx.wait(1),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Transaction timeout')), 60000))
       ]);
-
-      if (!receipt.status) {
-        throw new Error('Transaction failed on chain');
-      }
-
+      
       console.log('Transaction confirmed:', receipt);
-
-      // Get game ID from logs
-      let gameId = 0;
-      if (receipt.logs && receipt.logs[0]) {
-        try {
-          gameId = Number.parseInt(receipt.logs[0].topics[1].slice(2), 16);
-          console.log('Parsed game ID:', gameId);
-        } catch (e) {
-          console.error('Failed to parse game ID:', e);
-          throw new Error('Failed to get game ID');
-        }
-      }
-
+      
+      // Get the game ID from the event logs
+      const gameStartedEvent = receipt.events?.find(e => e.event === 'GameStarted');
+      const gameId = gameStartedEvent?.args?.gameId.toNumber();
+      
       if (!gameId) {
-        throw new Error('Invalid game ID');
+        throw new Error('Failed to get game ID from transaction');
       }
-
-      // Update transaction as confirmed
+      
+      // Mark transaction as confirmed with game ID
       addToQueue({
         id: txId,
         type: 'start',
         status: 'confirmed',
         timestamp: Date.now(),
-        hash: receipt.hash,
-        data: { gameId }
-      });
-
-      return { gameId, startTime: Date.now() };
-
-    } catch (error) {
-      console.error('Start game error:', error);
-
-      // If it's a nonce/replacement error, try one more time with higher gas
-      if (error instanceof Error && (error.message?.includes('replacement') || error.message?.includes('nonce'))) {
-        try {
-          console.log('Retrying with higher gas...');
-          
-          // Create fresh provider
-          const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
-          
-          // Test provider connection
-          await provider.getBlockNumber();
-          
-          if (!currentWallet) {
-            throw new Error('Wallet not initialized');
-          }
-          const connectedWallet = currentWallet.connect(provider);
-          const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI, connectedWallet);
-
-          // Get fresh nonce and very high gas price using getFeeData
-          const walletAddress = await connectedWallet.getAddress();
-          const nonce = await provider.getTransactionCount(walletAddress, 'latest');
-          const feeData = await provider.getFeeData();
-          const gasPrice = feeData.gasPrice ? 
-            (BigInt(feeData.gasPrice.toString()) * BigInt(200)) / BigInt(100) : 
-            BigInt(20e9);
-
-          // Use same fixed gas limit
-          const gasLimit = BigInt(300000);
-
-          const tx = await contract.startGame(walletAddress, {
-            nonce,
-            gasPrice,
-            gasLimit,
-            type: 0
-          });
-
-          console.log('Retry transaction sent:', tx.hash);
-
-          const receipt = await tx.wait();
-          
-          if (!receipt.status) {
-            throw new Error('Retry transaction failed on chain');
-          }
-
-          const gameId = receipt.logs?.[0] ? 
-            Number.parseInt(receipt.logs[0].topics[1].slice(2), 16) : 
-            0;
-
-          if (!gameId) {
-            throw new Error('Invalid game ID from retry');
-          }
-
-          // Retry transaction sent logic
-          addToQueue({
-            id: txId,
-            type: 'start',
-            status: 'confirmed',
-            timestamp: Date.now(),
-            hash: receipt.hash,
-            data: { gameId }
-          });
-
-          return { gameId, startTime: Date.now() };
-
-        } catch (retryError) {
-          console.error('Retry also failed:', retryError);
-          addToQueue({
-            id: txId,
-            type: 'start',
-            status: 'failed',
-            timestamp: Date.now(),
-            error: 'Failed to start game after retry. Please wait a moment and try again.'
-          });
-          throw new Error('Failed to start game. Please wait a moment and try again.');
+        hash: tx.hash,
+        data: {
+          gameId,
+          address: await state.signer.getAddress()
         }
-      }
-
-      // For other errors, mark as failed with specific messages
-      addToQueue({
-        id: txId,
-        type: 'start',
-        status: 'failed',
-        timestamp: Date.now(),
-        error: error instanceof Error ? error.message : 'Unknown error'
       });
-
-      // Throw user-friendly errors
-      if (error instanceof Error) {
-        if (error.message?.includes('insufficient funds')) {
-          throw new Error('Not enough FUSE for gas. Please make sure you have enough FUSE.');
-        } else if (error.message?.includes('timeout')) {
-          throw new Error('Network is slow. Please try again in a moment.');
-        } else if (error.message?.includes('pending transaction')) {
-          throw new Error('Please wait for pending transaction to complete before starting a new game.');
-        } else if (error.message?.includes('provider connection failed')) {
-          throw new Error('Network connection failed. Please try again.');
-        } else {
-          throw new Error('Failed to start game. Please refresh the page and try again.');
-        }
-      } else {
-        throw new Error('Failed to start game. Please refresh the page and try again.');
-      }
+      
+      return { gameId };
+    } catch (error: any) {
+      console.error('Start game failed:', error);
+      throw error;
+    } finally {
+      setTransactionPending(false);
     }
   };
 
@@ -784,108 +587,110 @@ export function useFlappyContract() {
     totalJumps: number,
     jumps: any[]
   ) => {
-    if (!state.contract || !wallet) {
-      throw new Error('Contract or wallet not initialized');
-    }
-
+    console.log('Ending game...');
+    setTransactionPending(true);
+    
     try {
-      // Get wallet address
-      const walletAddress = await wallet.getAddress();
-      console.log('Ending game with wallet:', walletAddress);
-
-      // Get game info
-      const gameInfo = await state.contract.getGameInfo(gameId);
-      console.log('Game ownership check:', {
-        gamePlayer: gameInfo.player.toLowerCase(),
-        custodialWallet: walletAddress.toLowerCase(),
-        gameEnded: gameInfo.ended
+      if (!state.contract) {
+        throw new Error('Contract not initialized');
+      }
+      
+      // Use MetaMask directly 
+      await switchToFuseFlash();
+      
+      // We'll use MetaMask signer directly
+      if (!state.signer) {
+        throw new Error('MetaMask not connected');
+      }
+      
+      console.log('Using address:', await state.signer.getAddress());
+      
+      // Create a unique transaction ID
+      const txId = `end-${gameId}-${Date.now()}`;
+      
+      // Add to transaction queue as pending using direct MetaMask transaction
+      addToQueue({
+        id: txId,
+        type: 'end',
+        status: 'pending',
+        timestamp: Date.now(),
+        data: {
+          gameId,
+          finalScore,
+          totalJumps
+        }
       });
-
-      if (gameInfo.ended) {
-        throw new Error('Game has already ended');
-      }
-
-      if (gameInfo.player.toLowerCase() !== walletAddress.toLowerCase()) {
-        throw new Error('Must use same wallet that started the game');
-      }
-
-      // Format jumps data
+      
+      // Format the jump data for the contract
       const formattedJumps = jumps.map(jump => ({
         timestamp: BigInt(Math.floor(jump.timestamp)),
-        scoreAtJump: BigInt(jump.scoreAtJump || 0),
-        multiplierAtJump: BigInt(1)
+        scoreAtJump: BigInt(jump.scoreAtJump),
+        multiplierAtJump: BigInt(jump.multiplierAtJump || 1)
       }));
-
-      console.log('Sending end game transaction:', {
+      
+      // Get gas fees with buffer to ensure transaction goes through
+      const feeData = await state.provider?.getFeeData();
+      const gasPrice = feeData?.gasPrice ? 
+        feeData.gasPrice.mul(150).div(100) : // Add 50% buffer
+        ethers.utils.parseUnits('20', 'gwei');
+      
+      // Call the contract method directly with MetaMask
+      const tx = await state.contract.endGame(
         gameId,
         finalScore,
         totalJumps,
-        jumpsLength: formattedJumps.length
-      });
-
-      // Create a fresh provider
-      const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
-      
-      // Connect wallet to provider
-      const connectedWallet = wallet.connect(provider);
-      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI, connectedWallet);
-      
-      // Get fee data for legacy transaction
-      const feeData = await provider.getFeeData();
-      
-      // Use legacy gasPrice with 50% buffer
-      const gasPrice = feeData.gasPrice ? 
-        (BigInt(feeData.gasPrice.toString()) * BigInt(150)) / BigInt(100) : 
-        BigInt(20e9); // 20 gwei default
-      
-      console.log('Using gas params:', {
-        gasPrice: gasPrice.toString(),
-        gasLimit: '5000000'
-      });
-
-      const tx = await contract.endGame(
-        BigInt(gameId),
-        BigInt(finalScore),
-        BigInt(totalJumps),
         formattedJumps,
         {
-          gasLimit: BigInt(5000000),
+          gasLimit: 5000000,
           gasPrice,
-          type: 0 // Legacy transaction type
+          type: 0 // Use legacy transaction format
         }
       );
-
-      console.log('Transaction sent:', tx.hash);
       
-      // Wait for confirmation with timeout
+      // Update transaction with hash
+      addToQueue({
+        id: txId,
+        type: 'end',
+        status: 'pending',
+        timestamp: Date.now(),
+        hash: tx.hash,
+        data: {
+          gameId,
+          finalScore,
+          totalJumps
+        }
+      });
+      
+      console.log('End game transaction sent:', tx.hash);
+      
+      // Wait for transaction confirmation with timeout
       const receipt = await Promise.race([
-        tx.wait(2), // Wait for 2 confirmations
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Transaction timeout after 60s')), 60000)
-        )
-      ]) as any;
+        tx.wait(1),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Transaction timeout')), 60000))
+      ]);
       
-      console.log('Transaction confirmed:', receipt);
-      return receipt;
-
+      console.log('End game transaction confirmed:', receipt);
+      
+      // Mark transaction as confirmed
+      addToQueue({
+        id: txId,
+        type: 'end',
+        status: 'confirmed',
+        timestamp: Date.now(),
+        hash: tx.hash,
+        data: {
+          gameId,
+          finalScore,
+          totalJumps
+        }
+      });
+      
+      return { success: true };
     } catch (error: any) {
       console.error('End game failed:', error);
-      
-      // Provide clearer error messages
-      let errorMessage = 'Failed to save score';
-      if (error.message?.includes('gasPrice')) {
-        errorMessage = 'Network connection issue. Please try again.';
-      } else if (error.message?.includes('dynamicFee')) {
-        errorMessage = 'Transaction type not supported. Please try again with a different wallet.';
-      } else if (error.message?.includes('timeout')) {
-        errorMessage = 'Transaction took too long. The game score may still be saved.';
-      } else if (error.message?.includes('rejected')) {
-        errorMessage = 'Transaction was rejected. Please try again.';
-      } else if (error.message?.includes('already ended')) {
-        errorMessage = 'This game has already been ended.';
-      }
-      
-      throw new Error(errorMessage);
+      throw error;
+    } finally {
+      setTransactionPending(false);
     }
   };
 
