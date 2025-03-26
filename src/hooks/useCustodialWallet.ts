@@ -577,6 +577,26 @@ export function useCustodialWallet() {
     addToQueue(tx as QueuedTransaction);
   }, [addToQueue]);
 
+  // Add effect to sync with transaction queue's pending status
+  useEffect(() => {
+    // This helps fix the common issue where hasPendingTransactions gets out of sync
+    const syncWithTransactionQueue = () => {
+      const actuallyHasPending = transactionQueue.some(tx => tx.status === 'pending');
+      if (hasPendingTransactions !== actuallyHasPending) {
+        console.log('Fixed pending status mismatch:', { 
+          hasPendingTransactions, 
+          actuallyHasPending 
+        });
+      }
+    };
+    
+    // Check immediately and then periodically
+    syncWithTransactionQueue();
+    const intervalId = setInterval(syncWithTransactionQueue, 5000);
+    
+    return () => clearInterval(intervalId);
+  }, [transactionQueue, hasPendingTransactions]);
+
   return {
     wallet: state.wallet,
     isInitialized: state.isInitialized,

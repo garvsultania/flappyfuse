@@ -181,6 +181,23 @@ export function useTransactionQueue() {
     setIsPending(false);
   }, []);
 
+  // Add a fix for the isPending state getting stuck
+  const checkAndFixPendingState = useCallback(() => {
+    // First check if we actually have any pending transactions
+    const actuallyHasPending = queue.some(tx => tx.status === 'pending');
+    
+    // If isPending is true but we don't have any pending transactions, reset it
+    if (isPending && !actuallyHasPending) {
+      console.log('Fixed: isPending was true but no pending transactions found. Resetting state.');
+      setIsPending(false);
+      
+      // Also save the current state to localStorage to ensure consistency
+      localStorage.setItem(TRANSACTION_STORAGE_KEY, JSON.stringify(queue));
+    }
+    
+    return actuallyHasPending;
+  }, [queue, isPending]);
+
   // Force save queue to localStorage
   const forceSave = useCallback(() => {
     // Get the current queue directly from state
@@ -224,6 +241,7 @@ export function useTransactionQueue() {
     canProcessTransaction,
     clearOldTransactions,
     clearQueue,
-    forceSave
+    forceSave,
+    checkAndFixPendingState
   };
 } 

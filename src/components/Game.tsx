@@ -79,7 +79,13 @@ export function Game() {
   } = useCustodialWallet();
 
   // Get transaction queue directly to show pending transactions
-  const { queue: transactionQueue, addToQueue, clearQueue, forceSave } = useTransactionQueue();
+  const { 
+    queue: transactionQueue, 
+    addToQueue, 
+    clearQueue, 
+    forceSave,
+    checkAndFixPendingState 
+  } = useTransactionQueue();
 
   useEffect(() => {
       console.log('Canvas ref:', canvasRef.current);
@@ -356,8 +362,12 @@ export function Game() {
           hasPendingTransactions
         });
         
+        // Check if we have any actual pending transactions
+        // This fixes the issue where hasPendingTransactions is true but there are no real pending transactions
+        const actuallyHasPending = checkAndFixPendingState();
+        
         // Check for pending transactions first
-        if (hasPendingTransactions) {
+        if (actuallyHasPending) {
           setError('Please wait for pending transactions to complete before starting a new game');
           return;
         }
@@ -706,7 +716,7 @@ export function Game() {
                 </div>
                 {tx.hash && (
                   <a 
-                    href={`https://explorer.fuse.io/tx/${tx.hash}`} 
+                    href={`https://fuse-flash.explorer.quicknode.com/tx/${tx.hash}`} 
                     target="_blank" 
                     rel="noopener noreferrer"
                     className="tx-link"
@@ -754,6 +764,15 @@ export function Game() {
       </div>
     );
   };
+
+  // Add an effect to periodically check and fix the pending state issue
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      checkAndFixPendingState();
+    }, 5000); // Check every 5 seconds
+    
+    return () => clearInterval(intervalId);
+  }, [checkAndFixPendingState]);
 
   // Return the JSX directly without try/catch wrapping the return
   return (
@@ -990,6 +1009,21 @@ export function Game() {
                       </span>
                     )}
                   </div>
+                  
+                  {/* Add transaction explorer link for latest game transaction */}
+                  {!transactionPending && gameState.gameId && (
+                    <div className="mt-2">
+                      <a 
+                        href={`https://fuse-flash.explorer.quicknode.com/address/${address}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="w-full flex items-center justify-center gap-2 bg-gray-900/80 text-purple-400 hover:text-purple-300 rounded-xl p-3 border border-purple-500/20 text-sm transition-colors"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                        View Transactions on Explorer
+                      </a>
+                    </div>
+                  )}
                 </div>
 
                 {/* Play Again Button */}
@@ -1152,30 +1186,14 @@ export function Game() {
               <h3 className="text-lg font-semibold text-white flex items-center gap-2 mb-4">
                 <div className="w-1 h-6 bg-[#00D13F] rounded-full" />
                 Recent Activity
-                <div className="ml-auto flex gap-2">
-                  <button 
-                    onClick={() => {
-                      console.log('Forcing transaction queue save');
-                      forceSave();
-                    }}
-                    className="text-xs text-blue-400 bg-blue-400/10 px-2 py-1 rounded hover:bg-blue-400/20"
-                  >
-                    Save
-                  </button>
-                  <button 
-                    onClick={() => {
-                      console.log('Clearing transaction queue for debugging');
-                      clearQueue();
-                    }}
-                    className="text-xs text-red-400 bg-red-400/10 px-2 py-1 rounded hover:bg-red-400/20"
-                  >
-                    Clear
-                  </button>
-                </div>
               </h3>
               <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2">
                 {/* Use the transaction queue instead of the old transactions array */}
-                {transactionQueue.slice(0, 10).map((tx) => {
+                {transactionQueue
+                  .slice() // Create a copy of the array to sort
+                  .sort((a, b) => b.timestamp - a.timestamp) // Sort by timestamp, newest first
+                  .slice(0, 10) // Take only the first 10 after sorting
+                  .map((tx) => {
                   // Debug output to console
                   console.log(`Rendering tx: ${tx.id}, type: ${tx.type}, status: "${tx.status}"`, {
                     statusType: typeof tx.status,
@@ -1245,7 +1263,7 @@ export function Game() {
                     {tx.hash && (
                       <div className="mt-2 pt-2 border-t border-[#6C5DD3]/10">
                         <a 
-                          href={`https://explorer.fuse.io/tx/${tx.hash}`}
+                          href={`https://fuse-flash.explorer.quicknode.com/tx/${tx.hash}`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="flex items-center justify-between text-xs text-[#6C5DD3] hover:text-[#8F7FF7] transition-colors px-2 py-1.5 bg-[#6C5DD3]/10 rounded-md"
