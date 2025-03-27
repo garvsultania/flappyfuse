@@ -42,17 +42,17 @@ export function useLocalStorage<T>(key: string, initialValue: T): [T, (value: T)
 }
 
 export function Leaderboard({ onPlayerClick }: LeaderboardProps) {
-  const { entries = [], loading, error } = useLeaderboard();
+  const { entries = [], loading, error, isRealData } = useLeaderboard();
   // Replace with local storage
   const [userAddress, setUserAddress] = useLocalStorage<string>("userAddress", "");
 
   if (loading) {
     return (
-      <div className="bg-[#1A1A1A] rounded-lg p-6 shadow-lg animate-pulse">
-        <div className="h-8 bg-gray-700 rounded w-1/3 mb-4"></div>
+      <div className="animate-pulse">
+        <div className="h-6 bg-white/5 rounded-sm w-1/3 mb-2"></div>
         <div className="space-y-2">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="h-12 bg-gray-700 rounded"></div>
+            <div key={i} className="h-10 bg-white/5 rounded-sm"></div>
           ))}
         </div>
       </div>
@@ -60,49 +60,43 @@ export function Leaderboard({ onPlayerClick }: LeaderboardProps) {
   }
 
   return (
-    <div className="bg-[#1A1A1A] rounded-lg p-6 shadow-lg">
-      <div className="flex items-center gap-2 mb-6">
-        <Trophy className="w-6 h-6 text-[#6C5DD3]" />
-        <h2 className="text-xl font-semibold text-white">Leaderboard</h2>
-      </div>
-
+    <div>
       {error && (
-        <div className="bg-[#2A2A2A] rounded-lg p-3 mb-4 text-xs text-gray-400">
+        <div className="bg-[#1a1a25] rounded-sm p-3 mb-3 text-xs text-white/40">
           {error}
         </div>
       )}
 
-      <div className="space-y-4">
+      <div className="space-y-2">
         {entries.map((entry, index) => (
           <div
             key={entry.address + index}
-            className="bg-[#2A2A2A] rounded-lg p-4 flex items-center justify-between cursor-pointer hover:bg-[#3A3A3A] transition-colors"
-            onClick={() => onPlayerClick?.(entry.address)}
+            className="bg-[#1a1a25] rounded-sm p-3 flex items-center justify-between cursor-pointer hover:bg-[#252538] transition-colors border border-white/5"
           >
-            <div className="flex items-center gap-4">
-              <div className="w-8 h-8 rounded-full bg-[#6C5DD3]/10 flex items-center justify-center text-[#6C5DD3] font-semibold">
+            <div className="flex items-center gap-3">
+              <div className="w-6 h-6 rounded-sm bg-[#6C5DD3]/10 flex items-center justify-center text-[#6C5DD3] font-medium text-sm">
                 {index + 1}
               </div>
-              <div>
-                <p className="text-white font-medium">
-                  {entry.address === userAddress ? 'You' : `Player ${entry.address.slice(0, 6)}...`}
-                </p>
-                <p className="text-sm text-gray-400">Score: {entry.score}</p>
+              <div className="font-medium text-sm text-white flex items-center gap-1">
+                {entry.address === userAddress ? (
+                  <span className="text-green-400">You</span>
+                ) : (
+                  <span className="font-mono text-white">{entry.address.slice(0, 4)}...{entry.address.slice(-4)}</span>
+                )}
+                <span className="mx-1.5 text-white/30">•</span>
+                <span className="text-white/50 text-xs">{new Date(entry.timestamp * 1000).toLocaleDateString(undefined, {month: 'short', day: 'numeric'})}</span>
               </div>
             </div>
             <div className="text-right">
-              <p className="text-xl font-bold text-white">{entry.score}</p>
-              <p className="text-sm text-gray-400">
-                {new Date(entry.timestamp * 1000).toLocaleDateString()}
-              </p>
+              <span className="text-base font-medium text-[#4ADE80]">{entry.score}</span>
             </div>
           </div>
         ))}
       </div>
 
       {entries.length === 0 && !error && (
-        <div className="text-center py-8">
-          <p className="text-gray-400">No games played yet</p>
+        <div className="text-center py-4">
+          <p className="text-white/40 text-sm">No games played yet</p>
         </div>
       )}
     </div>

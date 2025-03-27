@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Bird, Cloud, Settings, ChevronRight, Trophy, Coins } from 'lucide-react';
+import { Bird, Cloud, Settings, ChevronRight, Trophy, Coins, Info } from 'lucide-react';
 import { useFlappyContract } from '../hooks/useFlappyContract';
 import { useCustodialWallet } from '../hooks/useCustodialWallet';
 import { TransactionTable } from './TransactionTable';
@@ -35,6 +35,10 @@ const INITIAL_STATE: GameState = {
   score: 0,
 };
 
+// Add a constant for the localStorage keys
+const TOTAL_GAMES_KEY = 'flappyFuse_totalGames';
+const TUTORIAL_SHOWN_KEY = 'flappyFuse_tutorialShown';
+
 const GRAVITY = 0.6;
 const JUMP_STRENGTH = -8;
 const PIPE_WIDTH = 60;
@@ -50,9 +54,10 @@ interface JumpData {
 }
 
 export function Game() {
-  // Move all refs and state declarations outside the try block
+  // Refs for canvas and game loop
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const gameLoopRef = useRef<number>();
+  const gameContainerRef = useRef<HTMLDivElement>(null);
   
   const [gameState, setGameState] = useState<GameState>(INITIAL_STATE);
   const [velocity, setVelocity] = useState(0);
@@ -61,6 +66,11 @@ export function Game() {
   const [error, setError] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [hasStartedMoving, setHasStartedMoving] = useState(false);
+  const [totalGamesPlayed, setTotalGamesPlayed] = useState<number>(0);
+  const [showTutorial, setShowTutorial] = useState<boolean>(false);
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const [transactionHash, setTransactionHash] = useState<string | null>(null);
+  const [showNetworkInfo, setShowNetworkInfo] = useState<boolean>(false);
 
   const { address, startGame, endGame, connectWallet, error: contractError, resetGameStateAndReconnect } = useFlappyContract();
   const { 
@@ -71,7 +81,6 @@ export function Game() {
     initializeWallet,
     addTransaction,
     resetGameState,
-    handleEndGame: custodialHandleEndGame,
     pendingJumps,
     uniqueUsers,
     updateUniqueUsers,
@@ -473,15 +482,16 @@ export function Game() {
     };
 
   const handleEndGame = async () => {
-    if (gameLoopRef.current) {
-      cancelAnimationFrame(gameLoopRef.current);
-      gameLoopRef.current = undefined;
+    if (!gameState.gameId) {
+      console.warn('No game ID found for end game');
+      return;
     }
 
-    // Keep the final game state
+    // Calculate final state
     const finalGameState = {
       ...gameState,
-      isPlaying: false
+      isPlaying: false,
+      isGameOver: true
     };
 
     setGameState(finalGameState);
@@ -496,74 +506,41 @@ export function Game() {
 
       // Generate a transaction ID for this end game event
       const gameId = parseInt(finalGameState.gameId);
-      const endTxId = `end-${gameId}-${Date.now()}`;
       
-      // Add an initial end game transaction to the queue
-      addToQueue({
-        id: endTxId,
-        type: 'end',
-        status: 'pending',
-        timestamp: Date.now(),
-        data: {
-          gameId,
-          finalScore: finalGameState.score,
-          totalJumps: finalGameState.totalJumps
-        }
-      });
-
-      console.log('End game transaction created:', endTxId);
-
-      // Call the custodial wallet's handleEndGame function
-      const receipt = await custodialHandleEndGame(
+      console.log('Ending game with ID:', gameId, 'and score:', finalGameState.score);
+      
+      // Increment total games counter
+      const newTotalGames = totalGamesPlayed + 1;
+      setTotalGamesPlayed(newTotalGames);
+      localStorage.setItem(TOTAL_GAMES_KEY, newTotalGames.toString());
+      
+      // Call the endGame function from useFlappyContract
+      const result = await endGame(
         gameId,
-        finalGameState.score
+        finalGameState.score,
+        finalGameState.totalJumps,
+        finalGameState.jumps
       );
 
-      // Update the transaction with hash if we got a receipt
-      if (receipt && receipt.hash) {
-        console.log('End game transaction confirmed with hash:', receipt.hash);
-        
-        // Use addToQueue instead of updateTransaction for consistency
-        addToQueue({
-          id: endTxId,
-          type: 'end',
-          status: 'confirmed',
-          timestamp: Date.now(),
-          hash: receipt.hash,
-          data: {
-            gameId,
-            finalScore: finalGameState.score,
-            totalJumps: finalGameState.totalJumps
-          }
-        });
-        
-        // Force save the queue to ensure it's stored in localStorage
-        forceSave();
+      console.log('End game result:', result);
+      
+      // Set transaction hash if available
+      if (result.hash) {
+        setTransactionHash(result.hash);
       }
-
+      
+      // If the game was only saved locally, show a notification
+      if (result.localOnly) {
+        setError(result.message || 'Game saved locally only');
+      }
+      
       // Set the final game state
       setGameState(finalGameState);
 
     } catch (err) {
       console.error('End game error:', err);
       
-      const gameId = finalGameState.gameId ? parseInt(finalGameState.gameId) : 0;
-      const endTxId = `end-${gameId}-${Date.now()}`;
-      
-      // Mark the transaction as failed
-      addToQueue({
-        id: endTxId,
-        type: 'end',
-        status: 'failed',
-        timestamp: Date.now(),
-        error: err instanceof Error ? err.message : 'Unknown error',
-        data: {
-          gameId,
-          finalScore: finalGameState.score,
-          totalJumps: finalGameState.totalJumps
-        }
-      });
-      
+      // Display error message to user
       setError(err instanceof Error ? err.message : 'Failed to save game data');
       
       // Still end the game even if save failed
@@ -571,9 +548,6 @@ export function Game() {
     } finally {
       setIsLoading(false);
       setTransactionPending(false);
-      
-      // Force save one more time to ensure all data is persisted
-      forceSave();
     }
   };
 
@@ -716,12 +690,18 @@ export function Game() {
                 </div>
                 {tx.hash && (
                   <a 
-                    href={`https://fuse-flash.explorer.quicknode.com/tx/${tx.hash}`} 
-                    target="_blank" 
+                    href={`https://explorer.fuse.io/tx/${tx.hash}/internal-transactions`}
+                    target="_blank"
                     rel="noopener noreferrer"
-                    className="tx-link"
+                    className="mt-2 flex items-center justify-between text-xs text-[#6C5DD3] hover:text-[#8F7FF7] transition-colors px-2 py-1 bg-[#1a1a25] rounded-sm"
                   >
-                    View
+                    <span className="flex items-center gap-1">
+                      <ChevronRight className="w-3 h-3" />
+                      View
+                    </span>
+                    <span className="font-mono text-white/40 text-[10px]">
+                      {tx.hash.slice(0, 6)}...{tx.hash.slice(-4)}
+                    </span>
                   </a>
                 )}
               </div>
@@ -739,16 +719,6 @@ export function Game() {
                       <span className="text-green-400">{tx.data.finalScore}</span>
                     </div>
                   )}
-                </div>
-              )}
-              
-              {/* Show transaction hash in pending state */}
-              {tx.hash && (
-                <div className="mt-2 text-xs text-gray-400 bg-gray-800/30 p-2 rounded-md overflow-hidden font-mono">
-                  <div className="truncate">
-                    <span className="text-gray-500">Tx: </span>
-                    <span>{tx.hash.slice(0, 8)}...{tx.hash.slice(-6)}</span>
-                  </div>
                 </div>
               )}
               
@@ -774,564 +744,671 @@ export function Game() {
     return () => clearInterval(intervalId);
   }, [checkAndFixPendingState]);
 
-  // Return the JSX directly without try/catch wrapping the return
-  return (
-    <div className="relative min-h-screen bg-[#1a1a2e] text-white flex overflow-hidden">
-      {/* Left side - How it works */}
-      <div className="w-96 p-6 bg-[#16162a]/50 backdrop-blur-sm border-r border-[#6C5DD3]/20 overflow-y-auto max-h-screen scrollbar-thin scrollbar-track-transparent scrollbar-thumb-[#6C5DD3]/10 hover:scrollbar-thumb-[#6C5DD3]/20">
-        <div className="sticky top-6 space-y-8">
-          <div className="flex items-center gap-3 mb-8">
-            <Bird className="w-8 h-8 text-[#00D13F]" />
-            <h2 className="text-2xl font-bold bg-gradient-to-r from-[#00D13F] to-[#4ADE80] bg-clip-text text-transparent">
-              Flappy Fuse
-            </h2>
-          </div>
+  // Add effect to load and initialize total games counter
+  useEffect(() => {
+    try {
+      const savedTotalGames = localStorage.getItem(TOTAL_GAMES_KEY);
+      if (savedTotalGames) {
+        setTotalGamesPlayed(parseInt(savedTotalGames, 10));
+      } else {
+        // Initialize with 0 if not found
+        localStorage.setItem(TOTAL_GAMES_KEY, '0');
+      }
+    } catch (e) {
+      console.error('Failed to load total games count:', e);
+    }
+  }, []);
 
-          {/* How to Play Section - Simplified */}
-          <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-              <div className="w-1 h-6 bg-[#00D13F] rounded-full" />
-              How to Play
-            </h3>
-            <div className="bg-[#1a1a2e]/50 rounded-xl p-4 border border-[#6C5DD3]/20 shadow-xl">
-              <div className="flex items-center gap-3 text-gray-300">
-                <kbd className="px-3 py-1.5 bg-[#16162a] rounded-lg text-sm font-mono border border-gray-700">SPACE</kbd>
-                <span>or</span>
-                <kbd className="px-3 py-1.5 bg-[#16162a] rounded-lg text-sm font-mono border border-gray-700">CLICK</kbd>
-                <span>to jump</span>
+  // Add effect to check if tutorial has been shown before
+  useEffect(() => {
+    try {
+      const tutorialShown = localStorage.getItem(TUTORIAL_SHOWN_KEY);
+      if (!tutorialShown) {
+        // Tutorial hasn't been shown yet
+        setShowTutorial(true);
+      }
+    } catch (e) {
+      console.error('Failed to check tutorial status:', e);
+    }
+  }, []);
+
+  const handleCloseTutorial = () => {
+    setShowTutorial(false);
+    // Save in localStorage that the tutorial has been shown
+    localStorage.setItem(TUTORIAL_SHOWN_KEY, 'true');
+  };
+
+  // Game Over screen with enhanced error handling
+  const GameOverScreen = () => {
+    return (
+      <div className="absolute inset-0 bg-[#1A1A2E]/95 backdrop-blur-sm flex flex-col items-center justify-center px-4">
+        <div className="bg-[#212136] rounded-xl shadow-xl w-full max-w-md overflow-hidden">
+          <div className="px-6 py-8">
+            <div className="text-center mb-6">
+              <h2 className="text-3xl font-bold text-white mb-1">Game Over</h2>
+              <p className="text-gray-400">Better luck next time!</p>
+            </div>
+            
+            {error && (
+              <div className="mb-6 bg-red-500/10 border border-red-500/20 rounded-lg p-4">
+                <p className="text-red-400 text-sm">{error}</p>
+                {error.includes('insufficient funds') && (
+                  <div className="mt-3 flex flex-col gap-2">
+                    <p className="text-gray-400 text-xs">Need FUSE tokens?</p>
+                    <a 
+                      href="https://faucet.quicknode.com/fuse/flash" 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="text-sm px-3 py-2 bg-green-500/20 text-green-400 rounded-md flex items-center justify-center gap-2 hover:bg-green-500/30 transition-colors"
+                    >
+                      Get FUSE from Faucet
+                    </a>
+                  </div>
+                )}
+              </div>
+            )}
+            
+            <div className="space-y-4">
+              <div className="bg-[#2A2A46] rounded-lg p-4 flex items-center justify-between">
+                <div className="text-gray-400">Final Score</div>
+                <div className="text-2xl font-bold text-white">{gameState.score}</div>
+              </div>
+              
+              <div className="bg-[#2A2A46] rounded-lg p-4 flex items-center justify-between">
+                <div className="text-gray-400">Total Jumps</div>
+                <div className="text-xl font-bold text-[#6C5DD3]">{gameState.totalJumps}</div>
+              </div>
+              
+              {gameState.gameId && (
+                <div className="bg-[#2A2A46] rounded-lg p-4 flex items-center justify-between">
+                  <div className="text-gray-400">Game ID</div>
+                  <div className="text-sm font-mono text-white">{gameState.gameId}</div>
+                </div>
+              )}
+              
+              {transactionPending && (
+                <div className="mt-4 bg-[#2A2A46] rounded-lg p-4">
+                  <div className="flex items-center justify-center mb-2">
+                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#6C5DD3]"></div>
+                    <span className="ml-2 text-gray-300">Saving your score on-chain...</span>
+                  </div>
+                  <p className="text-center text-xs text-gray-500">This may take a few moments</p>
+                </div>
+              )}
+            </div>
+            
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={resetGame}
+                disabled={transactionPending}
+                className="w-full py-3 px-4 bg-[#6C5DD3] hover:bg-[#8F7FF7] disabled:bg-gray-700 disabled:text-gray-400 text-white font-medium rounded-lg transition-colors"
+              >
+                Play Again
+              </button>
+              
+              <button
+                onClick={() => setShowLeaderboard(true)}
+                className="py-3 px-4 bg-[#2A2A46] hover:bg-[#3A3A56] text-white font-medium rounded-lg transition-colors"
+              >
+                Leaderboard
+              </button>
+            </div>
+          </div>
+          
+          {/* Transaction Info Section */}
+          {gameState.gameId && (
+            <div className="border-t border-[#3A3A56] px-6 py-4 bg-[#1A1A2E]">
+              <div className="text-sm text-gray-400 mb-2 flex items-center justify-between">
+                <span>Game Transaction</span>
+                {transactionHash && (
+                  <a 
+                    href={`https://explorer.fuse.io/tx/${transactionHash}/internal-transactions`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-[#6C5DD3] hover:text-[#8F7FF7]"
+                  >
+                    View on Explorer
+                  </a>
+                )}
+              </div>
+              
+              <div className="text-xs text-gray-500">
+                {transactionHash ? (
+                  <span className="font-mono break-all">{transactionHash}</span>
+                ) : transactionPending ? (
+                  <span>Transaction pending...</span>
+                ) : error ? (
+                  <span className="text-red-400">Transaction failed</span>
+                ) : (
+                  <span>No transaction hash available</span>
+                )}
               </div>
             </div>
-          </div>
-
-          {/* Leaderboard Section */}
-          <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-              <div className="w-1 h-6 bg-yellow-400 rounded-full" />
-              Leaderboard
-            </h3>
-            <div className="bg-[#1a1a2e]/50 rounded-xl p-4 border border-[#6C5DD3]/20 shadow-xl">
-              <Leaderboard />
-            </div>
-          </div>
+          )}
         </div>
       </div>
+    );
+  };
 
-      {/* Center - Game Canvas */}
-      <div className="flex-1 flex flex-col items-center justify-center min-h-screen py-8 relative">
-        <div className="relative">
-          <canvas
-            ref={canvasRef}
-            width={800}
-            height={600}
-            className="bg-gradient-to-b from-[#1a1a2e] to-[#16162a] rounded-2xl shadow-2xl border border-[#6C5DD3]/20 backdrop-blur-sm"
-            onClick={handleJump}
-          />
+  const resetGame = () => {
+    console.log('Resetting game');
+    setGameState(INITIAL_STATE);
+    setVelocity(0);
+    setHasStartedMoving(false);
+    setError(null);
+    setTransactionHash(null);
+  };
 
-          {/* Countdown Overlay */}
-          {countdown !== null && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/90 backdrop-blur-sm rounded-2xl z-50">
-              <div className="text-center space-y-4">
-                <div className="text-8xl font-bold bg-gradient-to-r from-sky-400 to-purple-400 bg-clip-text text-transparent animate-pulse">
-                  {countdown}
-                </div>
-                <div className="text-xl text-gray-400 font-medium">
-                  Get Ready to Jump!
-                </div>
-              </div>
-            </div>
-          )}
+  const toggleTutorial = () => {
+    setShowTutorial(prev => !prev);
+  };
 
-          {/* Start Game Overlay */}
-          {!gameState.isPlaying && !gameState.totalJumps && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm rounded-2xl">
-              <div className="text-center space-y-6 max-w-md px-8">
-                <div className="flex items-center justify-center gap-3 mb-2">
-                  <Bird className="w-12 h-12 text-purple-400" />
-                  <h2 className="text-5xl font-bold bg-gradient-to-r from-sky-400 to-purple-400 bg-clip-text text-transparent">
-                    Flappy Fuse
-                  </h2>
-                </div>
-                
-                <div className="space-y-2">
-                  <p className="text-gray-400 text-lg">
-                    Every jump is recorded on-chain
-                  </p>
-                  <p className="text-sm text-gray-500">
-                    Powered by Fuse Ember Network
-                  </p>
-                </div>
-
-                {!address && (
-                  <div className="text-sm text-gray-400 space-y-3">
-                    <p>👋 Connect your wallet to play!</p>
-                    <div className="flex flex-col gap-3">
-                      <button
-                        onClick={() => {
-                          // Clear any previous error
-                          setError(null);
-                          try {
-                            // Call the connect function and handle errors
-                            connectWallet().catch(err => {
-                              console.error('Connection error:', err);
-                              setError(err.message || 'Failed to connect wallet');
-                            });
-                          } catch (err) {
-                            console.error('Connection error:', err);
-                            setError(err instanceof Error ? err.message : 'Failed to connect wallet');
-                          }
-                        }}
-                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-2 transition-colors"
-                      >
-                        <Settings className="w-6 h-6" />
-                        <span>{contractError && contractError.includes('Connecting') ? 'Connecting...' : 'Connect Wallet'}</span>
-                      </button>
-                      <a 
-                        href="https://fuse-flash.quicknode.com/faucet" 
-                        target="_blank" 
-                        rel="noopener noreferrer"
-                        className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg flex items-center justify-center space-x-2 transition-colors"
-                      >
-                        <Coins className="w-5 h-5" />
-                        <span>Get FUSE Tokens</span>
-                      </a>
-                    </div>
-                    <div className="text-xs text-gray-500 mt-2">
-                      Need FUSE tokens?{' '}
-                      <a 
-                        href="https://faucet.quicknode.com/fuse/flash" 
-                        target="_blank" 
-                        rel="noopener noreferrer"
-                        className="text-[#6C5DD3] hover:text-[#8F7FF7] underline"
-                      >
-                        Get them from the faucet
-                      </a>
-                    </div>
-                    
-                    {/* Add Reset button below the wallet display */}
-                    <div className="mt-3">
-                      <button
-                        onClick={() => {
-                          // Clear any game state and force reconnection
-                          resetGameState();
-                          window.location.reload();
-                        }}
-                        className="w-full bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors text-sm flex items-center justify-center gap-2"
-                      >
-                        <Settings className="w-4 h-4" />
-                        Reset Connection
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {address && (
-                  <div className="text-sm text-white space-y-3">
-                    <div className="bg-[#2A2A3A] rounded-lg p-3 mb-2">
-                      <div className="text-gray-400 text-xs mb-1">Your Address:</div>
-                      <div className="text-[#6C5DD3] text-sm font-mono overflow-hidden text-ellipsis">
-                        {`${address.substring(0, 8)}...${address.substring(address.length - 6)}`}
-                      </div>
-                    </div>
-                    
-                    <button
-                      onClick={handleStartGame}
-                      disabled={isLoading || transactionPending}
-                      className="w-full bg-gradient-to-r from-green-500 to-emerald-600 text-white font-bold py-3 px-6 rounded-lg flex items-center justify-center gap-2 hover:from-green-600 hover:to-emerald-700 transition-all transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
-                    >
-                      <Bird className="w-5 h-5" />
-                      {transactionPending ? 'Confirming...' : 
-                       isLoading ? 'Starting...' : 'Start Game'}
-                    </button>
-                    
-                    {error && (
-                      <div className="mt-2 p-3 bg-red-900/20 rounded-lg border border-red-500/20 text-red-400 text-xs">
-                        {error}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Game Instructions */}
-                {gameState.isPlaying && !countdown && (
-                  <div className="absolute top-20 left-1/2 transform -translate-x-1/2 bg-black/50 backdrop-blur-sm px-4 py-2 rounded-lg text-gray-300 text-sm">
-                    <div className="flex items-center gap-2">
-                      <kbd className="px-2 py-1 bg-gray-800 rounded text-xs">SPACE</kbd>
-                      <span>or</span>
-                      <span>CLICK</span>
-                      <span>to jump</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Game Over Overlay */}
-          {!gameState.isPlaying && gameState.totalJumps > 0 && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/90 backdrop-blur-sm rounded-2xl">
-              <div className="text-center space-y-6 p-8 bg-gray-900/50 rounded-2xl border border-green-500/20 max-w-md mx-auto transform scale-90">
-                <div>
-                  <h2 className="text-4xl font-bold bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent mb-2">
-                    Game Over!
-                  </h2>
-                  <p className="text-gray-400">Your jumps are being recorded on-chain</p>
-                </div>
-
-                {/* Game Stats */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-gray-900/80 p-4 rounded-xl border border-green-500/20">
-                    <p className="text-sm text-gray-400 mb-1">Final Score</p>
-                    <p className="text-3xl font-bold text-green-400">{gameState.score}</p>
-                  </div>
-                  <div className="bg-gray-900/80 p-4 rounded-xl border border-emerald-500/20">
-                    <p className="text-sm text-gray-400 mb-1">Total Jumps</p>
-                    <p className="text-3xl font-bold text-emerald-400">{gameState.totalJumps}</p>
-                  </div>
-                  <div className="col-span-2 bg-gray-900/80 p-4 rounded-xl border border-purple-500/20">
-                    <p className="text-sm text-gray-400 mb-1">Game ID</p>
-                    <p className="text-2xl font-bold text-purple-400">#{gameState.gameId || '-'}</p>
-                  </div>
-                </div>
-
-                {/* Transaction Progress */}
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-gray-400">Processing Status</span>
-                    {transactionPending ? (
-                      <span className="text-yellow-400 flex items-center gap-2">
-                        <div className="w-2 h-2 rounded-full bg-current animate-pulse" />
-                        Processing...
-                      </span>
-                    ) : (
-                      <span className="text-green-400 flex items-center gap-2">
-                        <div className="w-2 h-2 rounded-full bg-current" />
-                        Complete
-                      </span>
-                    )}
-                  </div>
-                  
-                  {/* Add transaction explorer link for latest game transaction */}
-                  {!transactionPending && gameState.gameId && (
-                    <div className="mt-2">
-                      <a 
-                        href={`https://fuse-flash.explorer.quicknode.com/address/${address}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="w-full flex items-center justify-center gap-2 bg-gray-900/80 text-purple-400 hover:text-purple-300 rounded-xl p-3 border border-purple-500/20 text-sm transition-colors"
-                      >
-                        <ChevronRight className="w-4 h-4" />
-                        View Transactions on Explorer
-                      </a>
-                    </div>
-                  )}
-                </div>
-
-                {/* Play Again Button */}
-                <button
-                  onClick={handleStartGame}
-                  disabled={isLoading || transactionPending}
-                  className="bg-gradient-to-r from-green-500 to-emerald-600 text-white font-bold py-3 px-6 rounded-xl flex items-center gap-2 mx-auto hover:from-green-600 hover:to-emerald-700 transition-all transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none shadow-lg"
-                >
-                  <Bird className="w-5 h-5" />
-                  {transactionPending ? 'Finishing Up...' : 
-                   isLoading ? 'Starting...' : 'Play Again'}
-                </button>
-              </div>
-            </div>
-          )}
+  const NetworkInfo = () => (
+    <div className="fixed bottom-4 left-4 bg-[#1A1A2E] p-4 rounded-lg shadow-lg border border-[#6C5DD3]/30 max-w-xs z-50">
+      <div className="flex items-start gap-3">
+        <div className="flex-shrink-0 mt-1">
+          <div className="w-3 h-3 rounded-full bg-green-400 animate-pulse"></div>
         </div>
-        
-        {/* Powered by Fuse */}
-        <div className="mt-6 text-center space-y-2">
-          <p className="text-sm text-gray-400">
-            Powered by{' '}
+        <div>
+          <h3 className="text-white font-medium mb-1">Fuse Flash Network</h3>
+          <p className="text-gray-400 text-sm mb-3">Play on a lightning-fast L2 blockchain with near-instant transactions</p>
+          
+          <div className="space-y-2">
             <a 
-              href="https://www.fuse.io" 
+              href="https://faucet.quicknode.com/fuse/flash" 
               target="_blank" 
               rel="noopener noreferrer"
-              className="font-medium bg-gradient-to-r from-[#00D13F] to-[#4ADE80] bg-clip-text text-transparent hover:opacity-80 transition-opacity"
+              className="block text-xs px-3 py-2 bg-green-500/20 text-green-400 rounded-md text-center hover:bg-green-500/30 transition-colors"
             >
-              Fuse Network
+              Get Free FUSE Tokens
             </a>
-          </p>
-          <div className="text-xs text-gray-500">
-            Built with ❤️ on Fuse Ember Network
+            
+            <a 
+              href="https://fuse-flash.bridge.quicknode.com/" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="block text-xs px-3 py-2 bg-blue-500/20 text-blue-400 rounded-md text-center hover:bg-blue-500/30 transition-colors"
+            >
+              Bridge to Fuse Flash
+            </a>
+            
+            <a 
+              href="https://docs.fuse.io/fuse-box/fuse-flash" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="block text-xs px-3 py-2 bg-[#6C5DD3]/20 text-[#6C5DD3] rounded-md text-center hover:bg-[#6C5DD3]/30 transition-colors"
+            >
+              Learn About Fuse Flash
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  // Game component return
+  return (
+    <div className="relative min-h-screen bg-[#1e1e2f] text-white flex flex-col overflow-hidden">
+      {/* Header */}
+      <div className="w-full px-6 py-4 border-b border-white/5">
+        <div className="max-w-7xl mx-auto flex justify-between items-center">
+          <div className="flex items-center">
+            <h1 className="text-2xl font-bold bg-gradient-to-r from-[#00D13F] to-[#4ADE80] bg-clip-text text-transparent">
+              Flappy Fuse
+            </h1>
+            <div className="ml-2 bg-[#00D13F]/10 text-[#00D13F] text-xs px-2 py-0.5 rounded-sm">
+              Beta
+            </div>
+          </div>
+          
+          <div className="flex gap-3">
+            <button 
+              onClick={() => setShowNetworkInfo(prev => !prev)}
+              className="flex items-center gap-1 px-3 py-1.5 text-white/70 hover:text-white transition-colors text-sm"
+            >
+              <Info className="w-4 h-4" />
+              Network Info
+            </button>
+
+            <button 
+              onClick={() => setShowLeaderboard(true)}
+              className="flex items-center gap-1 px-3 py-1.5 text-white/70 hover:text-white transition-colors text-sm"
+            >
+              <Trophy className="w-4 h-4" />
+              Leaderboard
+            </button>
           </div>
         </div>
       </div>
 
-      {/* Right - Wallet & Transactions */}
-      <div className="w-96 p-6 bg-[#16162a]/50 backdrop-blur-sm border-l border-[#6C5DD3]/20 overflow-y-auto max-h-screen scrollbar-thin scrollbar-track-transparent scrollbar-thumb-[#6C5DD3]/10 hover:scrollbar-thumb-[#6C5DD3]/20">
-        <div className="sticky top-6 space-y-8">
-          <div className="space-y-6">
-            {/* Wallet Status Section */}
-            <div>
-              <h3 className="text-lg font-semibold text-white flex items-center gap-2 mb-4">
-                <div className="w-1 h-6 bg-[#00D13F] rounded-full" />
-                Wallet Status
-              </h3>
+      {/* Main Game Area */}
+      <div className="flex-1 flex flex-col md:flex-row w-full max-w-full mx-auto px-6 py-6 gap-6">
+        {/* Main Content Area */}
+        <div className="flex-1 grid grid-cols-1 md:grid-cols-12 gap-6">
+          {/* Left Side - Stats & Wallet Section */}
+          <div className="md:col-span-3 space-y-5">
+            {/* Game Stats */}
+            <div className="bg-[#252538] rounded-md p-4 shadow-sm h-auto">
+              <h2 className="text-base font-medium text-white mb-3 flex items-center gap-2">
+                <Bird className="w-4 h-4 text-[#00D13F]" />
+                Game Stats
+              </h2>
               
-              <div className="bg-[#1a1a2e]/50 rounded-xl p-4 border border-[#6C5DD3]/20 space-y-4">
-                {/* Add Unique Users Counter */}
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-400">Unique Players</span>
-                  <span className="text-xl font-bold bg-gradient-to-r from-[#00D13F] to-[#4ADE80] bg-clip-text text-transparent">
-                    {uniqueUsers}
-                  </span>
+              <div className="space-y-3">
+                <div className="bg-[#1e1e2f] rounded-md p-3 border border-white/5 flex justify-between items-center">
+                  <div className="text-xs text-white/50">Total Games</div>
+                  <div className="text-base font-semibold bg-gradient-to-r from-[#00D13F] to-[#4ADE80] bg-clip-text text-transparent">{totalGamesPlayed}</div>
                 </div>
-
-                {/* Wallet Connection Status */}
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-400">Wallet</span>
-                  <span className={`font-medium ${address ? 'text-green-400' : 'text-gray-500'}`}>
-                    {address ? 'Connected' : 'Not Connected'}
-                  </span>
+                
+                <div className="bg-[#1e1e2f] rounded-md p-3 border border-white/5 flex justify-between items-center">
+                  <div className="text-xs text-white/50">Unique Players</div>
+                  <div className="text-base font-semibold text-[#6C5DD3]">{uniqueUsers}</div>
                 </div>
-
-                {/* Existing wallet status content */}
-                {!address && (
-                  <div className="text-sm text-gray-400 space-y-3">
-                    <p>👋 Connect your wallet to play!</p>
-                    <div className="flex flex-col gap-3">
-                      <button
-                        onClick={() => {
-                          // Clear any previous error
-                          setError(null);
-                          try {
-                            // Call the connect function and handle errors
-                            connectWallet().catch(err => {
-                              console.error('Connection error:', err);
-                              setError(err.message || 'Failed to connect wallet');
-                            });
-                          } catch (err) {
-                            console.error('Connection error:', err);
-                            setError(err instanceof Error ? err.message : 'Failed to connect wallet');
-                          }
-                        }}
-                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-2 transition-colors"
-                      >
-                        <Settings className="w-6 h-6" />
-                        <span>{contractError && contractError.includes('Connecting') ? 'Connecting...' : 'Connect Wallet'}</span>
-                      </button>
-                      <a 
-                        href="https://fuse-flash.quicknode.com/faucet" 
-                        target="_blank" 
-                        rel="noopener noreferrer"
-                        className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg flex items-center justify-center space-x-2 transition-colors"
-                      >
-                        <Coins className="w-5 h-5" />
-                        <span>Get FUSE Tokens</span>
-                      </a>
-                    </div>
-                    <div className="text-xs text-gray-500 mt-2">
-                      Need FUSE tokens?{' '}
-                      <a 
-                        href="https://faucet.quicknode.com/fuse/flash" 
-                        target="_blank" 
-                        rel="noopener noreferrer"
-                        className="text-[#6C5DD3] hover:text-[#8F7FF7] underline"
-                      >
-                        Get them from the faucet
-                      </a>
-                    </div>
-                    
-                    {/* Add Reset button below the wallet display */}
-                    <div className="mt-3">
-                      <button
-                        onClick={() => {
-                          // Clear any game state and force reconnection
-                          resetGameState();
-                          window.location.reload();
-                        }}
-                        className="w-full bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors text-sm flex items-center justify-center gap-2"
-                      >
-                        <Settings className="w-4 h-4" />
-                        Reset Connection
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {address && (
-                  <div className="text-sm text-white space-y-3">
-                    <div className="bg-[#2A2A3A] rounded-lg p-3 mb-2">
-                      <div className="text-gray-400 text-xs mb-1">Your Address:</div>
-                      <div className="text-[#6C5DD3] text-sm font-mono overflow-hidden text-ellipsis">
-                        {`${address.substring(0, 8)}...${address.substring(address.length - 6)}`}
-                      </div>
-                    </div>
-                    
-                    <button
-                      onClick={handleStartGame}
-                      disabled={isLoading || transactionPending}
-                      className="w-full bg-gradient-to-r from-green-500 to-emerald-600 text-white font-bold py-3 px-6 rounded-lg flex items-center justify-center gap-2 hover:from-green-600 hover:to-emerald-700 transition-all transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
-                    >
-                      <Bird className="w-5 h-5" />
-                      {transactionPending ? 'Confirming...' : 
-                       isLoading ? 'Starting...' : 'Start Game'}
-                    </button>
-                    
-                    {error && (
-                      <div className="mt-2 p-3 bg-red-900/20 rounded-lg border border-red-500/20 text-red-400 text-xs">
-                        {error}
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
+            </div>
+
+            {/* Wallet Section */}
+            <div className="bg-[#252538] rounded-md p-4 border border-white/5 h-auto">
+              <h2 className="text-base font-medium text-white mb-3">Wallet</h2>
+              
+              {wallet?.address ? (
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center bg-[#1e1e2f] rounded-md p-3 border border-white/5">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+                      <span className="text-green-400 text-xs">Connected</span>
+                    </div>
+                    <button
+                      onClick={resetGameStateAndReconnect}
+                      className="text-xs text-white/40 hover:text-white"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                  
+                  <div className="flex justify-between items-center bg-[#1e1e2f] rounded-md p-3 border border-white/5">
+                    <div className="text-xs text-white/50">Address:</div>
+                    <div className="text-xs text-white font-mono">
+                      {address ? address.slice(0, 6) + '...' + address.slice(-4) : 'Not connected'}
+                    </div>
+                  </div>
+                  
+                  <button
+                    onClick={handleStartGame}
+                    disabled={isLoading || hasPendingTransactions || gameState.isPlaying}
+                    className="w-full py-2 px-3 bg-[#4ADE80] hover:bg-[#3AC070] disabled:bg-white/10 disabled:text-white/30 text-white font-medium rounded-md transition-colors text-sm"
+                  >
+                    {isLoading ? 'Starting...' : 'Start New Game'}
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 bg-[#1e1e2f] rounded-md p-3 border border-white/5">
+                    <div className="w-2 h-2 bg-yellow-400 rounded-full"></div>
+                    <span className="text-yellow-400 text-xs">Not Connected</span>
+                  </div>
+                  
+                  <button
+                    onClick={connectWallet}
+                    disabled={isLoading}
+                    className="w-full py-2 px-3 bg-[#4ADE80] hover:bg-[#3AC070] disabled:bg-white/10 text-white font-medium rounded-md transition-colors text-sm flex items-center justify-center gap-2"
+                  >
+                    {isLoading ? (
+                      <>
+                        <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div>
+                        <span>Connecting...</span>
+                      </>
+                    ) : (
+                      <>Connect Wallet</>
+                    )}
+                  </button>
+                </div>
+              )}
+              
+              {/* Game Stats */}
+              {hasPendingTransactions && (
+                <div className="mt-3 bg-yellow-500/10 text-yellow-400 text-xs p-2 rounded-sm">
+                  You have pending transactions
+                </div>
+              )}
             </div>
 
             {/* Recent Activity */}
-            <div>
-              <h3 className="text-lg font-semibold text-white flex items-center gap-2 mb-4">
-                <div className="w-1 h-6 bg-[#00D13F] rounded-full" />
+            <div className="bg-[#252538] rounded-md p-4 shadow-sm">
+              <h2 className="text-base font-medium text-white mb-3 flex items-center gap-2">
+                <ChevronRight className="w-4 h-4 text-[#6C5DD3]" />
                 Recent Activity
-              </h3>
-              <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2">
-                {/* Use the transaction queue instead of the old transactions array */}
+              </h2>
+              
+              <div className="space-y-2 max-h-[350px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-[#1e1e2f] scrollbar-track-transparent">
                 {transactionQueue
-                  .slice() // Create a copy of the array to sort
-                  .sort((a, b) => b.timestamp - a.timestamp) // Sort by timestamp, newest first
-                  .slice(0, 10) // Take only the first 10 after sorting
-                  .map((tx) => {
-                  // Debug output to console
-                  console.log(`Rendering tx: ${tx.id}, type: ${tx.type}, status: "${tx.status}"`, {
-                    statusType: typeof tx.status,
-                    status: tx.status,
-                    isConfirmed: tx.status === 'confirmed',
-                    isPending: tx.status === 'pending'
-                  });
-                  return (
+                  .slice()
+                  .sort((a, b) => b.timestamp - a.timestamp)
+                  .slice(0, 5)
+                  .map((tx) => (
                   <div 
                     key={tx.id} 
-                    className="bg-[#1a1a2e]/50 rounded-xl p-4 border border-[#6C5DD3]/20 hover:border-[#6C5DD3]/40 transition-all"
+                    className="bg-[#1e1e2f] rounded-md p-3 border border-white/5 hover:border-[#6C5DD3]/20 transition-colors"
                   >
-                    {/* Debug status info */}
-                    <div className="text-xs text-gray-600 mb-1">
-                      Status: "{tx.status}" | ID: {tx.id.substring(0, 8)}...
-                    </div>
-                    {/* Header with status badge */}
-                    <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
-                        {/* Transaction Type Icon */}
-                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                        <div className={`w-6 h-6 rounded-md flex items-center justify-center ${
                           tx.type === 'jump' ? 'bg-[#6C5DD3]/10' :
                           tx.type === 'start' ? 'bg-green-500/10' :
                           'bg-purple-500/10'
                         }`}>
                           {tx.type === 'jump' ? 
-                            <Cloud className="w-4 h-4 text-[#6C5DD3]" /> :
+                            <Cloud className="w-3 h-3 text-[#6C5DD3]" /> :
                             tx.type === 'start' ? 
-                            <Bird className="w-4 h-4 text-green-400" /> :
-                            <Trophy className="w-4 h-4 text-purple-400" />
+                            <Bird className="w-3 h-3 text-green-400" /> :
+                            <Trophy className="w-3 h-3 text-purple-400" />
                           }
                         </div>
-                        {/* Transaction Info */}
                         <div>
-                          <span className={`text-sm font-medium ${
+                          <span className={`text-xs font-medium ${
                             tx.type === 'jump' ? 'text-[#6C5DD3]' :
                             tx.type === 'start' ? 'text-green-400' :
                             'text-purple-400'
                           }`}>
-                            {tx.type === 'jump' ? 'Jump Data' : 
-                             tx.type === 'start' ? 'Game Start' : 
-                             'Game End'}
+                            {tx.type === 'jump' ? 'Jump' : 
+                            tx.type === 'start' ? 'Start' : 
+                            'End'}
                           </span>
-                          <div className="text-xs text-gray-500 flex items-center gap-1">
+                          <div className="text-xs text-white/40">
                             {new Date(tx.timestamp).toLocaleTimeString()}
-                            {tx.data?.batchNumber && (
-                              <span className="text-gray-600">
-                                • Batch {tx.data.batchNumber}/{tx.data.totalBatches}
-                              </span>
-                            )}
                           </div>
                         </div>
                       </div>
-                      {/* Status Badge - force string comparison */}
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium flex items-center gap-1
-                        ${tx.status === 'confirmed' ? 'bg-green-500/10 text-green-400' : 
-                          tx.status === 'pending' ? 'bg-yellow-500/10 text-yellow-400 animate-pulse' : 
-                          'bg-red-500/10 text-red-400'}`}>
-                        {tx.status === 'pending' && <div className="w-1.5 h-1.5 rounded-full bg-current" />}
+                      <span className={`px-2 py-0.5 rounded-sm text-xs font-medium ${
+                        tx.status === 'confirmed' ? 'bg-green-500/10 text-green-400' : 
+                        tx.status === 'pending' ? 'bg-yellow-500/10 text-yellow-400' : 
+                        'bg-red-500/10 text-red-400'
+                      }`}>
                         {tx.status === 'confirmed' ? 'Confirmed' : 
-                         tx.status === 'pending' ? 'Pending' : 
-                         'Failed'}
+                        tx.status === 'pending' ? 'Pending' : 
+                        'Failed'}
                       </span>
                     </div>
                     
-                    {/* Add transaction hash as explorer link when available */}
                     {tx.hash && (
-                      <div className="mt-2 pt-2 border-t border-[#6C5DD3]/10">
-                        <a 
-                          href={`https://fuse-flash.explorer.quicknode.com/tx/${tx.hash}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center justify-between text-xs text-[#6C5DD3] hover:text-[#8F7FF7] transition-colors px-2 py-1.5 bg-[#6C5DD3]/10 rounded-md"
-                        >
-                          <span className="flex items-center gap-1">
-                            <ChevronRight className="w-3 h-3" />
-                            View on Explorer
-                          </span>
-                          <span className="font-mono text-gray-400">
-                            {tx.hash.slice(0, 6)}...{tx.hash.slice(-4)}
-                          </span>
-                        </a>
-                      </div>
+                      <a 
+                        href={`https://explorer.fuse.io/tx/${tx.hash}/internal-transactions`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-2 flex items-center justify-between text-xs text-[#6C5DD3] hover:text-[#8F7FF7] transition-colors px-2 py-1 bg-[#1a1a25] rounded-sm"
+                      >
+                        <span className="flex items-center gap-1">
+                          <ChevronRight className="w-3 h-3" />
+                          View
+                        </span>
+                        <span className="font-mono text-white/40 text-[10px]">
+                          {tx.hash.slice(0, 6)}...{tx.hash.slice(-4)}
+                        </span>
+                      </a>
                     )}
                     
-                    {/* Add game details when available */}
                     {tx.type === 'end' && tx.data && (
-                      <div className="mt-2 pt-2 border-t border-[#6C5DD3]/10 text-xs text-gray-400">
-                        <div className="flex justify-between">
-                          <span>Game ID:</span>
-                          <span className="text-gray-300">#{tx.data.gameId}</span>
-                        </div>
+                      <div className="mt-2 pt-2 border-t border-white/5 text-xs text-white/40">
+                        {tx.data.gameId && (
+                          <div className="flex justify-between">
+                            <span>Game ID:</span>
+                            <span className="text-white/70">#{tx.data.gameId}</span>
+                          </div>
+                        )}
                         {tx.data.finalScore !== undefined && (
                           <div className="flex justify-between">
                             <span>Score:</span>
                             <span className="text-green-400">{tx.data.finalScore}</span>
                           </div>
                         )}
-                        {tx.data.totalJumps !== undefined && (
-                          <div className="flex justify-between">
-                            <span>Jumps:</span>
-                            <span className="text-[#6C5DD3]">{tx.data.totalJumps}</span>
-                          </div>
-                        )}
                       </div>
                     )}
                   </div>
-                  );
-                })}
+                ))}
                 
                 {transactionQueue.length === 0 && (
-                  <div className="text-center py-6 text-gray-500 text-sm">
-                    No transactions yet. Start a game to see activity.
+                  <div className="text-center py-4 text-white/40 text-sm">
+                    No transactions yet
                   </div>
                 )}
               </div>
             </div>
           </div>
 
-          {/* Powered by Section */}
-          <div className="text-center space-y-2 py-4 border-t border-[#6C5DD3]/20">
-            <p className="text-sm text-gray-400">
-              Powered by{' '}
-              <a 
-                href="https://www.fuse.io" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="font-medium bg-gradient-to-r from-[#00D13F] to-[#4ADE80] bg-clip-text text-transparent hover:opacity-80 transition-opacity"
+          {/* Middle - Game Canvas Section */}
+          <div className="md:col-span-6 flex flex-col justify-center">
+            <div className="relative w-full h-full flex flex-col">
+              {/* Main Game Canvas */}
+              <div 
+                ref={gameContainerRef} 
+                onClick={handleJump} 
+                className="relative w-full aspect-[4/3] bg-[#1a1a25] rounded-md overflow-hidden border border-white/5 shadow-sm flex-grow mx-auto"
+                style={{ maxWidth: '100%', maxHeight: '100%' }}
               >
-                Fuse Network
-              </a>
-            </p>
-            <div className="text-xs text-gray-500">
-              Built with ❤️ on Fuse Ember Network
+                <canvas
+                  ref={canvasRef}
+                  width={800}
+                  height={600}
+                  className="w-full h-full object-contain"
+                />
+
+                {/* Game Specific Overlays */}
+                {!gameState.isPlaying && !gameState.totalJumps && !isLoading && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#1a1a25]/95">
+                    <div className="text-center space-y-4 max-w-md">
+                      <div>
+                        <h2 className="text-3xl font-bold bg-gradient-to-r from-[#00D13F] to-[#4ADE80] bg-clip-text text-transparent mb-2">
+                          Flappy Fuse
+                        </h2>
+                        <p className="text-white/50">The blockchain-powered bird game</p>
+                      </div>
+
+                      <div className="space-y-1 text-center">
+                        <p className="text-white/70">Press <span className="text-white font-mono bg-[#252538] px-2 py-1 rounded-sm">SPACE</span> or <span className="text-white font-mono bg-[#252538] px-2 py-1 rounded-sm">CLICK</span> to jump</p>
+                        <p className="text-white/40 text-sm">Avoid pipes and collect points!</p>
+                      </div>
+
+                      <button
+                        onClick={handleStartGame}
+                        disabled={isLoading}
+                        className="bg-gradient-to-r from-[#00D13F] to-[#4ADE80] text-white font-medium py-2 px-6 rounded-md flex items-center gap-2 mx-auto hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed w-full justify-center mt-4"
+                      >
+                        {isLoading ? 'Connecting...' : 'Start Game'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Countdown */}
+                {countdown !== null && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+                    <div className="text-9xl font-bold text-white">{countdown}</div>
+                  </div>
+                )}
+
+                {/* Game Over */}
+                {!gameState.isPlaying && gameState.totalJumps > 0 && <GameOverScreen />}
+
+                {/* Loading */}
+                {isLoading && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#1a1a25]/90">
+                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white"></div>
+                    <p className="mt-4 text-white/70">Connecting to blockchain...</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Right - Leaderboard Section */}
+          <div className="md:col-span-3 space-y-5">
+            {/* Leaderboard Section */}
+            <div className="bg-[#252538] rounded-md p-4 border border-white/5 h-full">
+              <h2 className="text-base font-medium text-white mb-3 flex items-center gap-2">
+                <Trophy className="w-4 h-4 text-[#6C5DD3]" />
+                Leaderboard
+              </h2>
+              <div className="max-h-[550px] overflow-y-auto">
+                <Leaderboard onPlayerClick={(address) => console.log('Clicked player:', address)} />
+              </div>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Tutorial Overlay */}
+      {showTutorial && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-[#1e1e2f] rounded-md shadow-xl max-w-lg w-full p-6">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-medium text-white">How to Play</h3>
+              <button 
+                onClick={toggleTutorial} 
+                className="text-white/40 hover:text-white"
+              >
+                &times;
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              <div className="bg-[#252538] rounded-md p-4 border border-white/5">
+                <h4 className="font-medium text-white mb-2">Game Controls</h4>
+                <ul className="space-y-2 text-white/70">
+                  <li className="flex items-center gap-2">
+                    <span className="bg-[#1a1a25] px-2 py-1 rounded-sm text-xs font-mono">SPACE</span>
+                    <span>or</span>
+                    <span className="bg-[#1a1a25] px-2 py-1 rounded-sm text-xs font-mono">CLICK</span>
+                    <span>to make the bird jump</span>
+                  </li>
+                  <li>Avoid hitting pipes or the ground</li>
+                  <li>Each pipe passed = 1 point</li>
+                </ul>
+              </div>
+              
+              <div className="bg-[#252538] rounded-md p-4 border border-white/5">
+                <h4 className="font-medium text-white mb-2">Blockchain Features</h4>
+                <ul className="space-y-1 text-sm text-white/70">
+                  <li>• Your scores are recorded on Fuse Flash Network</li>
+                  <li>• Each game is a verifiable transaction</li>
+                  <li>• Compete on the global leaderboard</li>
+                </ul>
+              </div>
+            </div>
+            
+            <div className="mt-6 text-center space-y-2">
+              <p className="text-sm text-white/50">
+                Powered by{' '}
+                <a 
+                  href="https://www.fuse.io" 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="font-medium bg-gradient-to-r from-[#00D13F] to-[#4ADE80] bg-clip-text text-transparent hover:opacity-80 transition-opacity"
+                >
+                  Fuse Network
+                </a>
+              </p>
+              <div className="text-xs text-white/30">
+                Built with ❤️ on <a 
+                  href="https://docs.fuse.io/fuse-box/fuse-flash" 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="text-[#6C5DD3] hover:text-[#8F7FF7]"
+                >
+                  Fuse Flash Network
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Leaderboard Overlay */}
+      {showLeaderboard && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-[#1e1e2f] rounded-md shadow-xl max-w-lg w-full p-6 max-h-[90vh] overflow-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-medium text-white">Leaderboard</h3>
+              <button 
+                onClick={() => setShowLeaderboard(false)} 
+                className="text-white/40 hover:text-white"
+              >
+                &times;
+              </button>
+            </div>
+            
+            <Leaderboard onPlayerClick={(address) => console.log('Clicked player:', address)} />
+            
+            {/* Powered by Section */}
+            <div className="text-center space-y-2 py-4 border-t border-white/5 mt-4">
+              <p className="text-sm text-white/50">
+                Powered by{' '}
+                <a 
+                  href="https://www.fuse.io" 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="font-medium bg-gradient-to-r from-[#00D13F] to-[#4ADE80] bg-clip-text text-transparent hover:opacity-80 transition-opacity"
+                >
+                  Fuse Network
+                </a>
+              </p>
+              <div className="text-xs text-white/30">
+                Built with ❤️ on <a 
+                  href="https://docs.fuse.io/fuse-box/fuse-flash" 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="text-[#6C5DD3] hover:text-[#8F7FF7]"
+                >
+                  Fuse Flash Network
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Network Info */}
+      {showNetworkInfo && (
+        <div className="fixed bottom-4 left-4 bg-[#1e1e2f] p-4 rounded-md shadow-lg border border-white/5 max-w-xs z-50">
+          <div className="flex items-start gap-3">
+            <div className="flex-shrink-0 mt-1">
+              <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></div>
+            </div>
+            <div>
+              <h3 className="text-white font-medium mb-1">Fuse Flash Network</h3>
+              <p className="text-white/50 text-sm mb-3">Play on a lightning-fast L2 blockchain with near-instant transactions</p>
+              
+              <div className="space-y-2">
+                <a 
+                  href="https://faucet.quicknode.com/fuse/flash" 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="block text-xs px-3 py-2 bg-[#252538] text-green-400 rounded-sm text-center hover:bg-[#2a2a42] transition-colors"
+                >
+                  Get Free FUSE Tokens
+                </a>
+                
+                <a 
+                  href="https://fuse-flash.bridge.quicknode.com/" 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="block text-xs px-3 py-2 bg-[#252538] text-blue-400 rounded-sm text-center hover:bg-[#2a2a42] transition-colors"
+                >
+                  Bridge to Fuse Flash
+                </a>
+                
+                <a 
+                  href="https://docs.fuse.io/fuse-box/fuse-flash" 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="block text-xs px-3 py-2 bg-[#252538] text-[#6C5DD3] rounded-sm text-center hover:bg-[#2a2a42] transition-colors"
+                >
+                  Learn About Fuse Flash
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

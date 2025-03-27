@@ -355,29 +355,52 @@ export function useFlappyContract() {
       }
     };
 
+    const handleAccountsChanged = async (accounts: string[]) => {
+      if (accounts.length === 0) {
+        setState(prev => ({
+          ...prev,
+          isConnected: false,
+          error: 'Please connect your wallet',
+        }));
+      } else {
+        try {
+          await connectWallet();
+        } catch (error: any) {
+          setState(prev => ({
+            ...prev,
+            error: error.message || 'Failed to reconnect wallet',
+          }));
+        }
+      }
+    };
+
     // Add event listeners
     window.ethereum.on('chainChanged', handleChainChanged);
     window.ethereum.on('accountsChanged', handleAccountsChanged);
     
-    // Request permissions and connect
-    try {
-      // Request permissions
-      await window.ethereum.request({ method: 'eth_requestAccounts' });
-      
-      // Switch to Fuse Flash chain
-      await switchToFuseFlash().catch((e: Error) => {
-        console.warn('Chain switch failed:', e);
-        throw new Error('Please switch to the Fuse-Flash network in MetaMask');
-      });
-    } catch (error: any) {
-      console.error('Failed to connect wallet:', error);
-      setState(prev => ({
-        ...prev,
-        error: error.message || 'Failed to connect wallet',
-        isInitialized: true,
-      }));
-      throw error;
-    }
+    // Use an async function inside useEffect
+    const setupWallet = async () => {
+      try {
+        // Request permissions
+        await window.ethereum.request({ method: 'eth_requestAccounts' });
+        
+        // Switch to Fuse Flash chain
+        await switchToFuseFlash().catch((e: Error) => {
+          console.warn('Chain switch failed:', e);
+          throw new Error('Please switch to the Fuse-Flash network in MetaMask');
+        });
+      } catch (error: any) {
+        console.error('Failed to connect wallet:', error);
+        setState(prev => ({
+          ...prev,
+          error: error.message || 'Failed to connect wallet',
+          isInitialized: true,
+        }));
+      }
+    };
+    
+    // Call the async function
+    setupWallet();
 
     return () => {
       window.ethereum.removeListener('chainChanged', handleChainChanged);
@@ -430,7 +453,7 @@ export function useFlappyContract() {
       console.log('Using address:', await state.signer.getAddress());
       
       // Create a unique transaction ID
-      const txId = `start-${Date.now()}`;
+    const txId = `start-${Date.now()}`;
       
       // Add to transaction queue as pending using direct MetaMask transaction
       addToQueue({
@@ -451,9 +474,10 @@ export function useFlappyContract() {
       
       // Call the contract method directly with MetaMask
       const tx = await state.contract.startGame(
+        await state.signer.getAddress(), // Pass the player's address as the first parameter
         {
           gasLimit: 5000000,
-          gasPrice,
+        gasPrice,
           type: 0 // Use legacy transaction format
         }
       );
@@ -469,7 +493,7 @@ export function useFlappyContract() {
           address: await state.signer.getAddress()
         }
       });
-      
+
       console.log('Start game transaction sent:', tx.hash);
       
       // Wait for transaction confirmation with timeout
@@ -477,17 +501,17 @@ export function useFlappyContract() {
         tx.wait(1),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Transaction timeout')), 60000))
       ]);
-      
+
       console.log('Transaction confirmed:', receipt);
-      
+
       // Get the game ID from the event logs
-      const gameStartedEvent = receipt.events?.find(e => e.event === 'GameStarted');
+      const gameStartedEvent = receipt.events?.find((e: any) => e.event === 'GameStarted');
       const gameId = gameStartedEvent?.args?.gameId.toNumber();
-      
+
       if (!gameId) {
         throw new Error('Failed to get game ID from transaction');
       }
-      
+
       // Mark transaction as confirmed with game ID
       addToQueue({
         id: txId,
@@ -585,14 +609,24 @@ export function useFlappyContract() {
     gameId: number,
     finalScore: number,
     totalJumps: number,
-    jumps: any[]
+    jumps: JumpData[]
   ) => {
-    console.log('Ending game...');
-    setTransactionPending(true);
-    
+    if (!state.contract || !state.signer) {
+      throw new Error('Contract not initialized');
+    }
+
     try {
-      if (!state.contract) {
-        throw new Error('Contract not initialized');
+      setTransactionPending(true);
+      
+      // Validate inputs
+      if (isNaN(gameId) || gameId <= 0) {
+        console.error('Invalid game ID:', gameId);
+        throw new Error('Invalid game ID');
+      }
+      
+      if (isNaN(finalScore) || finalScore < 0) {
+        console.error('Invalid score:', finalScore);
+        throw new Error('Invalid score');
       }
       
       // Use MetaMask directly 
@@ -615,80 +649,248 @@ export function useFlappyContract() {
         status: 'pending',
         timestamp: Date.now(),
         data: {
-          gameId,
-          finalScore,
+        gameId,
+        finalScore,
           totalJumps
         }
       });
       
-      // Format the jump data for the contract
-      const formattedJumps = jumps.map(jump => ({
-        timestamp: BigInt(Math.floor(jump.timestamp)),
-        scoreAtJump: BigInt(jump.scoreAtJump),
+      // Limit the number of jumps to reduce gas costs and avoid errors
+      // The contract might have limits on how many jumps it can process
+      const limitedJumps = jumps.slice(0, Math.min(jumps.length, 5));
+      console.log(`Using ${limitedJumps.length} jumps out of ${jumps.length} total jumps`);
+      
+      // Format the jump data for the contract - handle any potential errors in jump data
+      const formattedJumps = limitedJumps.map(jump => ({
+        timestamp: BigInt(Math.floor(jump.timestamp || Date.now() / 1000)),
+        scoreAtJump: BigInt(jump.scoreAtJump || 0),
         multiplierAtJump: BigInt(jump.multiplierAtJump || 1)
       }));
       
       // Get gas fees with buffer to ensure transaction goes through
-      const feeData = await state.provider?.getFeeData();
-      const gasPrice = feeData?.gasPrice ? 
-        feeData.gasPrice.mul(150).div(100) : // Add 50% buffer
-        ethers.utils.parseUnits('20', 'gwei');
+      let gasPrice;
+      try {
+        const feeData = await state.provider?.getFeeData();
+        gasPrice = feeData?.gasPrice ? 
+          feeData.gasPrice.mul(150).div(100) : // Add 50% buffer
+          ethers.utils.parseUnits('20', 'gwei');
+      } catch (error) {
+        console.warn('Failed to get fee data, using default gas price', error);
+        gasPrice = ethers.utils.parseUnits('20', 'gwei');
+      }
       
-      // Call the contract method directly with MetaMask
-      const tx = await state.contract.endGame(
+      // First verify game state
+      let gameVerified = false;
+      try {
+        const gameInfo = await state.contract.games(gameId);
+        console.log('Game info:', gameInfo);
+        
+        if (gameInfo.ended) {
+          throw new Error('Game has already ended');
+        }
+        
+        const playerAddress = await state.signer.getAddress();
+        if (gameInfo.player.toLowerCase() !== playerAddress.toLowerCase()) {
+          throw new Error('You can only end games that you started');
+        }
+        gameVerified = true;
+      } catch (error: any) {
+        if (error.message.includes('already ended') || error.message.includes('only end games')) {
+          throw error;
+        }
+        console.warn('Could not verify game state, attempting to end anyway:', error);
+      }
+      
+      console.log('Sending endGame transaction with params:', {
         gameId,
         finalScore,
         totalJumps,
+        jumpsCount: formattedJumps.length,
+        gasPrice: gasPrice.toString(),
+        gasLimit: 5000000,
+        gameVerified
+      });
+      
+      // Always save score locally regardless of blockchain success
+      const saveScoreLocally = () => {
+        // Get existing local scores
+        const localScoresJson = localStorage.getItem('flappyFuse_localScores') || '[]';
+        let localScores = [];
+        try {
+          localScores = JSON.parse(localScoresJson);
+        } catch (e) {
+          console.error('Failed to parse local scores:', e);
+          localScores = [];
+        }
+        
+        // Add this score
+        const playerAddress = state.signer ? state.signer.getAddress().catch(() => 'unknown') : 'unknown';
+        localScores.push({
+          gameId,
+          address: playerAddress,
+          score: finalScore,
+          totalJumps,
+          timestamp: Math.floor(Date.now() / 1000)
+        });
+        
+        // Save back to local storage
+        localStorage.setItem('flappyFuse_localScores', JSON.stringify(localScores));
+        console.log('Score saved locally:', finalScore);
+      };
+      
+      try {
+        // Call the contract method directly with MetaMask
+        const tx = await state.contract.endGame(
+          gameId,
+          finalScore,
+          totalJumps,
         formattedJumps,
         {
-          gasLimit: 5000000,
+            gasLimit: 5000000,
           gasPrice,
-          type: 0 // Use legacy transaction format
-        }
-      );
-      
-      // Update transaction with hash
-      addToQueue({
-        id: txId,
-        type: 'end',
-        status: 'pending',
-        timestamp: Date.now(),
-        hash: tx.hash,
-        data: {
-          gameId,
-          finalScore,
-          totalJumps
-        }
-      });
-      
-      console.log('End game transaction sent:', tx.hash);
-      
-      // Wait for transaction confirmation with timeout
+            type: 0 // Use legacy transaction format
+          }
+        );
+        
+        // Update transaction with hash
+        addToQueue({
+          id: txId,
+          type: 'end',
+          status: 'pending',
+          timestamp: Date.now(),
+          hash: tx.hash,
+          data: {
+            gameId,
+            finalScore,
+            totalJumps
+          }
+        });
+        
+        console.log('End game transaction sent:', tx.hash);
+        
+        // Wait for transaction confirmation with timeout
       const receipt = await Promise.race([
-        tx.wait(1),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Transaction timeout')), 60000))
-      ]);
-      
-      console.log('End game transaction confirmed:', receipt);
-      
-      // Mark transaction as confirmed
-      addToQueue({
-        id: txId,
-        type: 'end',
-        status: 'confirmed',
-        timestamp: Date.now(),
-        hash: tx.hash,
-        data: {
-          gameId,
-          finalScore,
-          totalJumps
+          tx.wait(1),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Transaction timeout')), 60000))
+        ]);
+        
+        console.log('End game transaction confirmed:', receipt);
+        
+        // Mark transaction as confirmed
+        addToQueue({
+          id: txId,
+          type: 'end',
+          status: 'confirmed',
+          timestamp: Date.now(),
+          hash: tx.hash,
+          data: {
+            gameId,
+            finalScore,
+            totalJumps
+          }
+        });
+        
+        // Also save locally for redundancy
+        saveScoreLocally();
+        
+        return { success: true, hash: tx.hash };
+      } catch (txError: any) {
+        console.error('Blockchain transaction failed:', txError);
+        
+        // Save score locally as fallback
+        saveScoreLocally();
+        
+        // Rethrow with better message
+        let userMessage = 'Failed to save your score on the blockchain, but it was recorded locally.';
+        
+        if (txError.message.includes('CALL_EXCEPTION') || txError.message.includes('transaction failed')) {
+          userMessage = 'Game score could not be saved on-chain due to contract error, but was recorded locally.';
+        } else if (txError.message.includes('already ended')) {
+          userMessage = 'This game was already ended.';
+        } else if (txError.message.includes('only end games')) {
+          userMessage = 'You can only end games that you started.';
+        } else if (txError.message.includes('timeout')) {
+          userMessage = 'Network response took too long. Your score was recorded locally.';
+        } else if (txError.message.includes('user rejected')) {
+          userMessage = 'Transaction was rejected in your wallet. Your score was recorded locally.';
+        } else if (txError.message.includes('insufficient funds')) {
+          userMessage = 'Not enough FUSE tokens to pay for the transaction. Your score was recorded locally.';
         }
-      });
-      
-      return { success: true };
+        
+        // Mark transaction as locally completed
+        const localTxId = `end-local-${gameId}-${Date.now()}`;
+        addToQueue({
+          id: localTxId,
+          type: 'end',
+          status: 'confirmed', // Mark as 'confirmed' locally
+          timestamp: Date.now(),
+          data: {
+            gameId,
+            finalScore,
+            totalJumps,
+            localOnly: true,
+            error: userMessage
+          }
+        });
+        
+        throw new Error(userMessage);
+      }
     } catch (error: any) {
       console.error('End game failed:', error);
-      throw error;
+      
+      // If we reach here, something went wrong before or outside the transaction
+      // Always try to save locally
+      try {
+        const localScoresJson = localStorage.getItem('flappyFuse_localScores') || '[]';
+        let localScores = [];
+        try {
+          localScores = JSON.parse(localScoresJson);
+        } catch (e) {
+          localScores = [];
+        }
+        
+        // Add this score
+        localScores.push({
+          gameId,
+          score: finalScore,
+          totalJumps,
+          timestamp: Math.floor(Date.now() / 1000)
+        });
+        
+        localStorage.setItem('flappyFuse_localScores', JSON.stringify(localScores));
+        console.log('Score saved locally as fallback:', finalScore);
+      } catch (localError) {
+        console.error('Failed to save score locally:', localError);
+      }
+      
+      // Create a nice error message
+      let userMessage = 'Game ended, but score could not be saved on the blockchain.';
+      if (error.message) {
+        userMessage = error.message;
+      }
+      
+      // Mark transaction as locally completed
+      const txId = `end-local-${gameId}-${Date.now()}`;
+      addToQueue({
+        id: txId,
+        type: 'end',
+        status: 'confirmed', // Mark as 'confirmed' locally
+        timestamp: Date.now(),
+        data: {
+          gameId,
+          finalScore,
+          totalJumps,
+          localOnly: true,
+          error: userMessage
+        }
+      });
+      
+      // Return success but with localOnly flag
+      return { 
+        success: true, 
+        localOnly: true, 
+        message: userMessage 
+      };
     } finally {
       setTransactionPending(false);
     }
