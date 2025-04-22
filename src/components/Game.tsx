@@ -23,16 +23,23 @@ interface GameState {
   gameId?: string;
   jumps: QueuedJump[];
   score: number;
+  showStartMessage: boolean;
 }
 
 const INITIAL_STATE: GameState = {
   isPlaying: false,
   birdPosition: 250,
-  pipePositions: [],
+  pipePositions: [
+    // Add initial pipes for better visual appearance
+    { x: 400, gapY: 300 },
+    { x: 700, gapY: 250 },
+    { x: 1000, gapY: 350 }
+  ],
   gameSpeed: 1.5,
   totalJumps: 0,
   jumps: [],
   score: 0,
+  showStartMessage: true, // Set to true to show the start message initially
 };
 
 // Add a constant for the localStorage keys
@@ -51,6 +58,20 @@ interface JumpData {
   timestamp: number;
   scoreAtJump: number;
   multiplierAtJump: number;
+}
+
+// Update the GameStartResult interface to make hash optional
+interface GameStartResult {
+  hash?: string;
+  gameId: string;
+}
+
+// Update the GameEndResult interface to make hash optional
+interface GameEndResult {
+  success: boolean;
+  hash?: string;
+  localOnly?: boolean;
+  message?: string;
 }
 
 export function Game() {
@@ -96,145 +117,149 @@ export function Game() {
     checkAndFixPendingState 
   } = useTransactionQueue();
 
+  // Add initial render effect
   useEffect(() => {
-      console.log('Canvas ref:', canvasRef.current);
     const canvas = canvasRef.current;
-      if (!canvas) {
-        console.error('Canvas element not found');
-        return;
-      }
+    if (!canvas) return;
 
     const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        console.error('Could not get 2D context');
-        return;
-      }
+    if (!ctx) return;
 
-      // Initial render to verify canvas is working
-      ctx.fillStyle = '#87CEEB';
-      ctx.fillRect(0, 0, 800, 600);
-      console.log('Initial canvas render complete');
+    // Initial render of game elements
+    drawGame(ctx);
+  }, []); // Empty dependency array means this runs once on mount
 
-      if (!gameState.isPlaying) return;
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      console.error('Canvas element not found');
+      return;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      console.error('Could not get 2D context');
+      return;
+    }
 
     const gameLoop = () => {
-        try {
+      try {
+        // Always draw the game elements
+        drawGame(ctx);
+
+        // Only update positions and handle game logic if the game is playing
+        if (gameState.isPlaying) {
           // Don't apply gravity if game hasn't started moving
           if (!hasStartedMoving) {
             return;
           }
 
-      // Update bird position
-      setGameState((prev) => ({
-        ...prev,
-        birdPosition: prev.birdPosition + velocity,
-      }));
+          // Update bird position
+          setGameState((prev) => ({
+            ...prev,
+            birdPosition: prev.birdPosition + velocity,
+          }));
 
-      // Update velocity (gravity)
-      setVelocity((prev) => prev + GRAVITY);
+          // Update velocity (gravity)
+          setVelocity((prev) => prev + GRAVITY);
 
-      // Update pipe positions and check for score
-      setGameState((prev) => {
-        const updatedPipes = prev.pipePositions.map((pipe) => ({
-          ...pipe,
-          x: pipe.x - prev.gameSpeed,
-        }));
+          // Update pipe positions and check for score
+          setGameState((prev) => {
+            const updatedPipes = prev.pipePositions.map((pipe) => ({
+              ...pipe,
+              x: pipe.x - prev.gameSpeed,
+            }));
 
-        // Check if bird has passed any pipes
-        let scoreIncrement = 0;
-        updatedPipes.forEach(pipe => {
-          // Bird's x position is fixed at 100
-          // If pipe just passed the bird's position, increment score
-          if (pipe.x + PIPE_WIDTH <= 100 && pipe.x + PIPE_WIDTH > 100 - prev.gameSpeed) {
-            scoreIncrement = 1;
+            // Check if bird has passed any pipes
+            let scoreIncrement = 0;
+            updatedPipes.forEach(pipe => {
+              if (pipe.x + PIPE_WIDTH <= 100 && pipe.x + PIPE_WIDTH > 100 - prev.gameSpeed) {
+                scoreIncrement = 1;
+              }
+            });
+
+            return {
+              ...prev,
+              pipePositions: updatedPipes.filter((pipe) => pipe.x > -PIPE_WIDTH),
+              score: prev.score + scoreIncrement
+            };
+          });
+
+          // Add new pipes
+          if (
+            gameState.pipePositions.length === 0 ||
+            gameState.pipePositions[gameState.pipePositions.length - 1].x < PIPE_SPAWN_DISTANCE
+          ) {
+            setGameState((prev) => ({
+              ...prev,
+              pipePositions: [
+                ...prev.pipePositions,
+                {
+                  x: 800 + Math.random() * 200,
+                  gapY: Math.random() * (400 - PIPE_GAP) + PIPE_GAP,
+                },
+              ],
+            }));
           }
-        });
 
-        return {
-          ...prev,
-          pipePositions: updatedPipes.filter((pipe) => pipe.x > -PIPE_WIDTH),
-          score: prev.score + scoreIncrement
-        };
-      });
+          // Check collisions
+          const bird = {
+            x: 100,
+            y: gameState.birdPosition,
+            width: BIRD_SIZE,
+            height: BIRD_SIZE,
+          };
 
-      // Add new pipes
-      if (
-        gameState.pipePositions.length === 0 ||
-        gameState.pipePositions[gameState.pipePositions.length - 1].x < PIPE_SPAWN_DISTANCE
-      ) {
-        setGameState((prev) => ({
-          ...prev,
-          pipePositions: [
-            ...prev.pipePositions,
-            {
-              x: 800 + Math.random() * 200,
-              gapY: Math.random() * (400 - PIPE_GAP) + PIPE_GAP,
-            },
-          ],
-        }));
-      }
+          for (const pipe of gameState.pipePositions) {
+            const upperPipe = {
+              x: pipe.x,
+              y: -10,
+              width: PIPE_WIDTH,
+              height: pipe.gapY - PIPE_GAP / 2,
+            };
 
-      // Check collisions
-      const bird = {
-        x: 100,
-        y: gameState.birdPosition,
-        width: BIRD_SIZE,
-        height: BIRD_SIZE,
-      };
+            const lowerPipe = {
+              x: pipe.x,
+              y: pipe.gapY + PIPE_GAP / 2,
+              width: PIPE_WIDTH,
+              height: 600 - (pipe.gapY + PIPE_GAP / 2),
+            };
 
-      for (const pipe of gameState.pipePositions) {
-        const upperPipe = {
-          x: pipe.x,
-          y: -10, // Extend slightly above screen
-          width: PIPE_WIDTH,
-          height: pipe.gapY - PIPE_GAP / 2,
-        };
-
-        const lowerPipe = {
-          x: pipe.x,
-          y: pipe.gapY + PIPE_GAP / 2,
-          width: PIPE_WIDTH,
-          height: 600 - (pipe.gapY + PIPE_GAP / 2),
-        };
-
-        if (
-          checkCollision(bird, upperPipe) ||
-          checkCollision(bird, lowerPipe) ||
-          gameState.birdPosition < 0 ||
-          gameState.birdPosition > 580
-        ) {
-          handleEndGame();
-          return;
-        }
-      }
-
-      // Draw game
-      drawGame(ctx);
-
-          // Schedule next frame
-      gameLoopRef.current = requestAnimationFrame(gameLoop);
-        } catch (error) {
-          console.error('Game loop error:', error);
-          // Reset game state on error
-          setGameState(INITIAL_STATE);
-          if (gameLoopRef.current) {
-            cancelAnimationFrame(gameLoopRef.current);
-            gameLoopRef.current = undefined;
+            if (
+              checkCollision(bird, upperPipe) ||
+              checkCollision(bird, lowerPipe) ||
+              gameState.birdPosition < 0 ||
+              gameState.birdPosition > 580
+            ) {
+              handleEndGame();
+              return;
+            }
           }
         }
-      };
 
-      // Start the game loop
+        // Schedule next frame
+        gameLoopRef.current = requestAnimationFrame(gameLoop);
+      } catch (error) {
+        console.error('Game loop error:', error);
+        setGameState(INITIAL_STATE);
+        if (gameLoopRef.current) {
+          cancelAnimationFrame(gameLoopRef.current);
+          gameLoopRef.current = undefined;
+        }
+      }
+    };
+
+    // Start the game loop
     gameLoopRef.current = requestAnimationFrame(gameLoop);
 
-      // Cleanup
+    // Cleanup
     return () => {
       if (gameLoopRef.current) {
         cancelAnimationFrame(gameLoopRef.current);
-          gameLoopRef.current = undefined;
+        gameLoopRef.current = undefined;
       }
     };
-    }, [gameState.isPlaying, velocity, gameState.pipePositions, hasStartedMoving]);
+  }, [gameState.isPlaying, velocity, gameState.pipePositions, hasStartedMoving]);
 
   const checkCollision = (
     rect1: { x: number; y: number; width: number; height: number },
@@ -347,6 +372,19 @@ export function Game() {
     ctx.fillStyle = '#6C5DD3';
     ctx.font = 'bold 24px Arial';
     ctx.fillText(gameState.totalJumps.toString(), overlayX + overlayWidth - 15, overlayY + 55);
+
+    // Draw "Press Space to Start" message if needed
+    if (gameState.showStartMessage) {
+      // Draw semi-transparent overlay
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+      ctx.fillRect(0, 0, 800, 600);
+      
+      // Draw message
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 32px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('Press SPACE to Start', 400, 300);
+    }
   };
 
     const startCountdown = () => {
@@ -371,11 +409,8 @@ export function Game() {
           hasPendingTransactions
         });
         
-        // Check if we have any actual pending transactions
-        // This fixes the issue where hasPendingTransactions is true but there are no real pending transactions
         const actuallyHasPending = checkAndFixPendingState();
         
-        // Check for pending transactions first
         if (actuallyHasPending) {
           setError('Please wait for pending transactions to complete before starting a new game');
           return;
@@ -392,10 +427,9 @@ export function Game() {
           return;
         }
 
-        // Create a unique ID for this start game transaction
         const startTxId = `start-${Date.now()}`;
         
-        // Add start game transaction to the queue as pending
+        // Add initial pending transaction
         addToQueue({
           id: startTxId,
           type: 'start',
@@ -407,25 +441,36 @@ export function Game() {
         });
 
         console.log('Calling startGame function...');
-        let gameResult;
+        let gameResult: GameStartResult;
         try {
-          gameResult = await startGame();
-          console.log('Game started with ID:', gameResult.gameId);
+          const result = await startGame() as { gameId: string; hash?: string };
+          gameResult = {
+            gameId: result.gameId,
+            hash: result.hash
+          };
+          console.log('Game started with transaction hash:', gameResult.hash);
           
-          // Update the start transaction to confirmed with game ID
+          // Update the existing transaction instead of adding a new one
           addToQueue({
-            id: startTxId,
+            id: startTxId, // Use the same ID to update the existing transaction
             type: 'start',
-            status: 'confirmed',
+            status: 'confirmed', // Change status to confirmed
             timestamp: Date.now(),
+            hash: gameResult.hash,
             data: {
-              gameId: gameResult.gameId.toString(),
               walletAddress: address.substring(0, 8) + '...' + address.substring(address.length - 6)
             }
           });
+
+          setGameState(prev => ({
+            ...prev,
+            isPlaying: true,
+            gameId: gameResult.gameId,
+            birdPosition: 250,
+            showStartMessage: false
+          }));
         } catch (startErr) {
           console.error('Start game function failed:', startErr);
-          // Add more user-friendly error messages
           let errorMessage = startErr instanceof Error ? startErr.message : 'Failed to start game';
           
           if (errorMessage.includes('transaction is already in progress')) {
@@ -440,7 +485,7 @@ export function Game() {
             errorMessage = 'Your game wallet is not ready. Please try again in a few seconds or refresh the page.';
           }
           
-          // Update the transaction as failed
+          // Update the existing transaction to failed state
           addToQueue({
             id: startTxId,
             type: 'start',
@@ -456,23 +501,6 @@ export function Game() {
           setIsLoading(false);
           return;
         }
-
-        // Then do the countdown
-        setCountdown(3);
-        for (let i = 2; i >= 1; i--) {
-          await new Promise(resolve => setTimeout(resolve, 800));
-          setCountdown(i);
-        }
-        await new Promise(resolve => setTimeout(resolve, 800));
-        setCountdown(null);
-
-        // Start game immediately after countdown
-        setGameState({
-          ...INITIAL_STATE,
-          isPlaying: true,
-          gameId: gameResult.gameId.toString(),
-          birdPosition: 250,
-        });
       } catch (err) {
         console.error('Failed to start game:', err);
         setError(err instanceof Error ? err.message : 'Failed to start game');
@@ -487,7 +515,6 @@ export function Game() {
       return;
     }
 
-    // Calculate final state
     const finalGameState = {
       ...gameState,
       isPlaying: false,
@@ -504,17 +531,14 @@ export function Game() {
         throw new Error('No game ID found');
       }
 
-      // Generate a transaction ID for this end game event
       const gameId = parseInt(finalGameState.gameId);
       
       console.log('Ending game with ID:', gameId, 'and score:', finalGameState.score);
       
-      // Increment total games counter
       const newTotalGames = totalGamesPlayed + 1;
       setTotalGamesPlayed(newTotalGames);
       localStorage.setItem(TOTAL_GAMES_KEY, newTotalGames.toString());
       
-      // Call the endGame function from useFlappyContract
       const result = await endGame(
         gameId,
         finalGameState.score,
@@ -522,28 +546,28 @@ export function Game() {
         finalGameState.jumps
       );
 
-      console.log('End game result:', result);
+      const endResult: GameEndResult = {
+        success: result.success,
+        hash: result.hash || undefined,
+        localOnly: result.localOnly,
+        message: result.message
+      };
+
+      console.log('End game result:', endResult);
       
-      // Set transaction hash if available
-      if (result.hash) {
-        setTransactionHash(result.hash);
+      if (endResult.hash) {
+        setTransactionHash(endResult.hash);
       }
       
-      // If the game was only saved locally, show a notification
-      if (result.localOnly) {
-        setError(result.message || 'Game saved locally only');
+      if (endResult.localOnly) {
+        setError(endResult.message || 'Game saved locally only');
       }
       
-      // Set the final game state
       setGameState(finalGameState);
 
     } catch (err) {
       console.error('End game error:', err);
-      
-      // Display error message to user
       setError(err instanceof Error ? err.message : 'Failed to save game data');
-      
-      // Still end the game even if save failed
       setGameState(finalGameState);
     } finally {
       setIsLoading(false);
@@ -690,7 +714,7 @@ export function Game() {
                 </div>
                 {tx.hash && (
                   <a 
-                    href={`https://explorer.fuse.io/tx/${tx.hash}/internal-transactions`}
+                    href={`https://fuse-flash.explorer.quicknode.com/tx/${tx.hash}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="mt-2 flex items-center justify-between text-xs text-[#6C5DD3] hover:text-[#8F7FF7] transition-colors px-2 py-1 bg-[#1a1a25] rounded-sm"
@@ -862,7 +886,7 @@ export function Game() {
                 <span>Game Transaction</span>
                 {transactionHash && (
                   <a 
-                    href={`https://explorer.fuse.io/tx/${transactionHash}/internal-transactions`}
+                    href={`https://fuse-flash.explorer.quicknode.com/tx/${transactionHash}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-xs text-[#6C5DD3] hover:text-[#8F7FF7]"
@@ -890,13 +914,14 @@ export function Game() {
     );
   };
 
-  const resetGame = () => {
+  const resetGame = async () => {
     console.log('Resetting game');
     setGameState(INITIAL_STATE);
     setVelocity(0);
     setHasStartedMoving(false);
     setError(null);
     setTransactionHash(null);
+    await handleStartGame();
   };
 
   const toggleTutorial = () => {
@@ -1132,7 +1157,7 @@ export function Game() {
                     
                     {tx.hash && (
                       <a 
-                        href={`https://explorer.fuse.io/tx/${tx.hash}/internal-transactions`}
+                        href={`https://fuse-flash.explorer.quicknode.com/tx/${tx.hash}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="mt-2 flex items-center justify-between text-xs text-[#6C5DD3] hover:text-[#8F7FF7] transition-colors px-2 py-1 bg-[#1a1a25] rounded-sm"

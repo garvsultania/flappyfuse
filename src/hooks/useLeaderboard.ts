@@ -80,15 +80,16 @@ export function useLeaderboard() {
                 localScores[gameId] = {
                   score: tx.data.finalScore,
                   timestamp: Math.floor(tx.timestamp / 1000),
-                  address: tx.data.address ? String(tx.data.address) : 'local_player'
+                  address: String(tx.data.address)
                 };
+                console.log("localScores: ", localScores, tx);
               }
             });
             
             // Add scores from transaction queue
             Object.values(localScores).forEach(score => {
               mergedEntries.push({
-                address: typeof score.address === 'string' ? score.address : 'local_player',
+                address: score.address.toString(),
                 score: score.score,
                 timestamp: score.timestamp
               });
@@ -199,6 +200,7 @@ export function useLeaderboard() {
               else if (Object.keys(contract.functions).includes('getLeaderboard')) {
                 console.log('Using getLeaderboard method');
                 leaderboardData = await contract.getLeaderboard();
+                console.log("leaderboardData: ", leaderboardData);
                 
                 leaderboardData = leaderboardData.map((entry: any) => ({
                   address: entry.player,

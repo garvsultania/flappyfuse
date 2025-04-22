@@ -46,114 +46,51 @@ export function useTransactionQueue() {
     }
   }, [queue]);
 
-  // Add a transaction to the queue
+  // Add function to check and fix pending state
+  const checkAndFixPendingState = useCallback(() => {
+    const actuallyHasPending = queue.some(tx => tx.status === 'pending');
+    if (isPending !== actuallyHasPending) {
+      console.log('Fixed pending status mismatch:', { isPending, actuallyHasPending });
+      setIsPending(actuallyHasPending);
+      return actuallyHasPending;
+    }
+    return isPending;
+  }, [queue, isPending]);
+
+  // Update queue management
   const addToQueue = useCallback((transaction: QueuedTransaction) => {
-    console.log('Adding transaction to queue:', transaction);
-    
-    // Ensure status is a string
-    const normalizedStatus = String(transaction.status);
-    
-    // Use functional state update to ensure we're working with the latest state
-    setQueue(prevQueue => {
-      // If this transaction already exists, update it
-      const existingIndex = prevQueue.findIndex(tx => tx.id === transaction.id);
-      
-      let newQueue: QueuedTransaction[];
-      
-      if (existingIndex >= 0) {
-        console.log('Updating existing transaction:', prevQueue[existingIndex], 'with:', transaction);
-        newQueue = [...prevQueue];
-        
-        // Ensure we don't overwrite status incorrectly (don't change confirmed to pending)
-        if (normalizedStatus === 'pending' && newQueue[existingIndex].status === 'confirmed') {
-          console.log('Preventing confirmed -> pending status change');
-          const { status, ...otherUpdates } = transaction;
-          newQueue[existingIndex] = {
-            ...newQueue[existingIndex],
-            ...otherUpdates
-          };
-        } else {
-          newQueue[existingIndex] = {
-            ...newQueue[existingIndex],
-            ...transaction,
-            // Explicitly normalize status to string
-            status: normalizedStatus,
-            // Preserve hash if not provided in the update
-            hash: transaction.hash || newQueue[existingIndex].hash
-          };
-        }
-        
-        console.log('Updated transaction:', newQueue[existingIndex]);
-      } else {
-        // Otherwise add it
-        console.log('Adding new transaction to queue');
-        newQueue = [...prevQueue, {
-          ...transaction,
-          // Explicitly normalize status to string
-          status: normalizedStatus
-        }];
-      }
-      
-      // Directly update localStorage for immediate persistence
-      try {
-        localStorage.setItem(TRANSACTION_STORAGE_KEY, JSON.stringify(newQueue));
-        console.log('Transaction queue saved to localStorage, queue size:', newQueue.length);
-      } catch (error) {
-        console.error('Failed to save transaction queue to localStorage:', error);
-      }
-      
+    setQueue(prev => {
+      const newQueue = [...prev, transaction];
+      const hasPending = newQueue.some(tx => tx.status === 'pending');
+      setIsPending(hasPending);
       return newQueue;
     });
   }, []);
 
-  // Update a transaction in the queue
   const updateTransaction = useCallback((id: string, updates: Partial<QueuedTransaction>) => {
-    console.log('Updating transaction with id:', id, 'Updates:', updates);
-    
-    // Ensure status is a string if present
-    const normalizedUpdates = { 
-      ...updates,
-      status: updates.status ? String(updates.status) : undefined
-    };
-    
-    setQueue(prevQueue => {
-      const index = prevQueue.findIndex(tx => tx.id === id);
-      if (index === -1) {
-        console.log('Transaction not found:', id);
-        return prevQueue;
-      }
-      
-      console.log('Found transaction at index:', index, 'Current state:', prevQueue[index]);
-      const newQueue = [...prevQueue];
-      
-      // Ensure we don't change confirmed status back to pending
-      if (normalizedUpdates.status === 'pending' && newQueue[index].status === 'confirmed') {
-        console.log('Preventing confirmed -> pending status change');
-        const { status, ...otherUpdates } = normalizedUpdates;
-        newQueue[index] = {
-          ...newQueue[index],
-          ...otherUpdates
-        };
-      } else {
-        newQueue[index] = {
-          ...newQueue[index],
-          ...normalizedUpdates
-        };
-      }
-      
-      console.log('Updated transaction:', newQueue[index]);
-      
-      // Force save to localStorage immediately if we're updating to confirmed status
-      if (normalizedUpdates.status === 'confirmed') {
-        setTimeout(() => {
-          console.log('Forcing save after status update to confirmed via updateTransaction');
-          localStorage.setItem(TRANSACTION_STORAGE_KEY, JSON.stringify(newQueue));
-        }, 100);
-      }
-      
+    setQueue(prev => {
+      const newQueue = prev.map(tx => 
+        tx.id === id ? { ...tx, ...updates } : tx
+      );
+      const hasPending = newQueue.some(tx => tx.status === 'pending');
+      setIsPending(hasPending);
       return newQueue;
     });
   }, []);
+
+  const clearQueue = useCallback(() => {
+    setQueue([]);
+    setIsPending(false);
+  }, []);
+
+  // Add effect to periodically check and fix pending state
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      checkAndFixPendingState();
+    }, 5000); // Check every 5 seconds
+    
+    return () => clearInterval(intervalId);
+  }, [checkAndFixPendingState]);
 
   // Check if we can process a transaction of given type
   const canProcessTransaction = useCallback((type: string) => {
@@ -172,31 +109,6 @@ export function useTransactionQueue() {
       );
     });
   }, []);
-
-  // Add a function to manually clear the queue for debugging
-  const clearQueue = useCallback(() => {
-    console.log('Clearing transaction queue from localStorage and state');
-    localStorage.removeItem(TRANSACTION_STORAGE_KEY);
-    setQueue([]);
-    setIsPending(false);
-  }, []);
-
-  // Add a fix for the isPending state getting stuck
-  const checkAndFixPendingState = useCallback(() => {
-    // First check if we actually have any pending transactions
-    const actuallyHasPending = queue.some(tx => tx.status === 'pending');
-    
-    // If isPending is true but we don't have any pending transactions, reset it
-    if (isPending && !actuallyHasPending) {
-      console.log('Fixed: isPending was true but no pending transactions found. Resetting state.');
-      setIsPending(false);
-      
-      // Also save the current state to localStorage to ensure consistency
-      localStorage.setItem(TRANSACTION_STORAGE_KEY, JSON.stringify(queue));
-    }
-    
-    return actuallyHasPending;
-  }, [queue, isPending]);
 
   // Force save queue to localStorage
   const forceSave = useCallback(() => {

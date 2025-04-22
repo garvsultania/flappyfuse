@@ -325,13 +325,13 @@ export function useCustodialWallet() {
       });
 
       return newWallet;
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to initialize custodial wallet:', error);
       
       // Mark transaction as failed
       updateTransaction(txId, {
         status: 'failed',
-        error: error.message || 'Unknown error'
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
       
       setState(prev => ({

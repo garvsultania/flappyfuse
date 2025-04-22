@@ -1,6 +1,7 @@
 import React from 'react';
 import { Trophy } from 'lucide-react';
 import { useLeaderboard } from '../hooks/useLeaderboard';
+import { useFlappyContract } from '../hooks/useFlappyContract';
 
 interface LeaderboardProps {
   onPlayerClick?: (address: string) => void;
@@ -43,8 +44,7 @@ export function useLocalStorage<T>(key: string, initialValue: T): [T, (value: T)
 
 export function Leaderboard({ onPlayerClick }: LeaderboardProps) {
   const { entries = [], loading, error, isRealData } = useLeaderboard();
-  // Replace with local storage
-  const [userAddress, setUserAddress] = useLocalStorage<string>("userAddress", "");
+  const { address } = useFlappyContract(); // Get the user's wallet address
 
   if (loading) {
     return (
@@ -78,10 +78,10 @@ export function Leaderboard({ onPlayerClick }: LeaderboardProps) {
                 {index + 1}
               </div>
               <div className="font-medium text-sm text-white flex items-center gap-1">
-                {entry.address === userAddress ? (
+                {entry.address === address ? (
                   <span className="text-green-400">You</span>
                 ) : (
-                  <span className="font-mono text-white">{entry.address.slice(0, 4)}...{entry.address.slice(-4)}</span>
+                  <span className="font-mono text-white nowrap">{entry?.address || 'local_player'}</span>
                 )}
                 <span className="mx-1.5 text-white/30">•</span>
                 <span className="text-white/50 text-xs">{new Date(entry.timestamp * 1000).toLocaleDateString(undefined, {month: 'short', day: 'numeric'})}</span>

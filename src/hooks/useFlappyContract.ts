@@ -263,24 +263,25 @@ export function useFlappyContract() {
         throw new Error('MetaMask is not installed. Please install MetaMask extension and refresh the page.');
       }
 
-      console.log('MetaMask detected, attempting to switch to Fuse-Flash network...');
-      
-      // First switch to the correct network
-      await switchToFuseFlash();
-      
-      console.log('Network switched, requesting accounts...');
-
-      // Request account access
-      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-      console.log('Accounts:', accounts);
-      
-      if (!accounts || accounts.length === 0) {
-        console.error('No accounts available after request');
-        throw new Error('No accounts found. Please unlock your MetaMask wallet.');
+      // First check if we're already connected
+      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+      if (accounts && accounts.length > 0) {
+        console.log('Already connected to account:', accounts[0]);
+      } else {
+        console.log('No accounts found, requesting access...');
+        // Request account access
+        const requestedAccounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        if (!requestedAccounts || requestedAccounts.length === 0) {
+          throw new Error('No accounts found. Please unlock your MetaMask wallet.');
+        }
+        console.log('Account connected:', requestedAccounts[0]);
       }
 
-      console.log('Account connected:', accounts[0]);
-
+      console.log('Switching to Fuse-Flash network...');
+      
+      // Switch to the correct network
+      await switchToFuseFlash();
+      
       // Create provider and signer
       const provider = new ethers.providers.Web3Provider(window.ethereum);
       const signer = provider.getSigner();
@@ -294,18 +295,10 @@ export function useFlappyContract() {
 
       console.log('Contract instance created, checking access...');
       
-      // Verify contract is accessible with more detailed error handling
+      // Verify contract is accessible
       try {
         const gameId = await contract.currentGameId();
         console.log('Current game ID:', gameId.toString());
-        
-        // Try another view function to verify full contract access
-        try {
-          const owner = await contract.owner();
-          console.log('Contract owner:', owner);
-        } catch (accessError) {
-          console.warn('Could not access owner(), but contract is still usable:', accessError);
-        }
       } catch (accessError) {
         console.error('Failed to access contract functions:', accessError);
         throw new Error('Unable to access game contract. Please check your connection and try again.');
